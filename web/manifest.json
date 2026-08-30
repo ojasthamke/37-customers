@@ -1,6 +1,6 @@
 {
-    "name": "aplibhaji_customer",
-    "short_name": "aplibhaji_customer",
+    "name": "aplibhaji_customers",
+    "short_name": "aplibhaji_customers",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
