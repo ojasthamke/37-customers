@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:sqflite/sqflite.dart' show ConflictAlgorithm, Database;
+import 'package:uuid/uuid.dart';
 import 'repositories.dart';
 import 'database_helper.dart';
 
@@ -73,7 +74,20 @@ class CachingCatalogRepository implements CatalogRepository {
     String? search,
     String? categoryId,
     Function(List<Map<String, dynamic>>)? onRefresh,
+    bool forceRefresh = false,
   }) async {
+    if (forceRefresh) {
+      debugPrint('[Cache] Products force refresh. Fetching from remote...');
+      try {
+        final remoteData = await _remote.getProducts(search: search, categoryId: categoryId);
+        await _cacheProducts(remoteData);
+        await _dbHelper.updateLastSynced('products');
+        return remoteData;
+      } catch (e) {
+        debugPrint('[Cache] Products force refresh failed: $e');
+      }
+    }
+
     // 1. Fetch cached data immediately
     final cachedData = await _local.getProducts(search: search, categoryId: categoryId);
     
@@ -176,6 +190,11 @@ class CachingCatalogRepository implements CatalogRepository {
     } catch (e) {
       debugPrint('[Cache] ProductDetail revalidation failure: $e');
     }
+  }
+
+  @override
+  Future<void> cacheProducts(List<Map<String, dynamic>> products) async {
+    await _cacheProducts(products);
   }
 
   /// Cache categories into SQLite (upsert)
@@ -289,6 +308,14 @@ class CachingOrderRepository implements OrderRepository {
           orderType: orderType,
           orderTakingDate: orderTakingDate,
         );
+        // Clean up any local offline duplicate before caching the synced order
+        final db = await _dbHelper.database;
+        await _deleteLocalOrderDuplicate(db, result);
+        if (actualOfflineNo.isNotEmpty) {
+          try {
+            await db.delete('orders', where: "offline_order_no = ?", whereArgs: [actualOfflineNo]);
+          } catch (_) {}
+        }
         // Cache the synced order locally
         await _cacheOrder(result, items, 'synced');
         return result;
@@ -392,15 +419,28 @@ class CachingOrderRepository implements OrderRepository {
 
   Future<void> _deleteLocalOrderDuplicate(Database db, Map<String, dynamic> order) async {
     final orderNo = order['order_number']?.toString();
+    final offlineNo = order['offline_order_no']?.toString();
     final orderId = order['id']?.toString();
+    final idempotencyKey = order['idempotency_key']?.toString();
+
+    if (offlineNo != null && offlineNo.isNotEmpty) {
+      try {
+        await db.delete('orders', where: "offline_order_no = ? AND (order_number IS NULL OR order_number = '' OR sync_status != 'synced')", whereArgs: [offlineNo]);
+      } catch (_) {}
+    }
     if (orderNo != null && orderNo.isNotEmpty) {
       try {
-        await db.delete('orders', where: "(order_number = ? OR offline_order_no = ?) AND sync_status != 'synced'", whereArgs: [orderNo, orderNo]);
+        await db.delete('orders', where: "order_number = ? AND sync_status != 'synced'", whereArgs: [orderNo]);
       } catch (_) {}
     }
     if (orderId != null && orderId.isNotEmpty) {
       try {
         await db.delete('orders', where: "id = ? AND sync_status != 'synced'", whereArgs: [orderId]);
+      } catch (_) {}
+    }
+    if (idempotencyKey != null && idempotencyKey.isNotEmpty) {
+      try {
+        await db.delete('orders', where: "idempotency_key = ?", whereArgs: [idempotencyKey]);
       } catch (_) {}
     }
   }
@@ -409,9 +449,36 @@ class CachingOrderRepository implements OrderRepository {
     try {
       final remoteOrders = await _remote.getOrders(customerPhone);
       final db = await _dbHelper.database;
+      
+      final remoteIds = remoteOrders.map((e) => e['id']?.toString()).where((e) => e != null && e.isNotEmpty).toList();
+      if (remoteIds.isNotEmpty) {
+        final placeholders = List.filled(remoteIds.length, '?').join(',');
+        await db.delete(
+          'orders',
+          where: "customer_phone = ? AND sync_status = 'synced' AND id NOT IN ($placeholders)",
+          whereArgs: [customerPhone, ...remoteIds],
+        );
+      } else {
+        await db.delete(
+          'orders',
+          where: "customer_phone = ? AND sync_status = 'synced'",
+          whereArgs: [customerPhone],
+        );
+      }
+
       for (final order in remoteOrders) {
-        await _deleteLocalOrderDuplicate(db, order);
-        await _cacheOrder(order, [], 'synced');
+        final localExisting = await _local.getOrderById(order['id']?.toString() ?? '');
+        final Map<String, dynamic> merged = Map<String, dynamic>.from(order);
+        if (localExisting != null) {
+          merged['order_type'] = localExisting['order_type'] ?? merged['order_type'];
+          final localTotal = (localExisting['total_amount'] as num?)?.toDouble() ?? 0.0;
+          final remoteTotal = (merged['total_amount'] as num?)?.toDouble() ?? 0.0;
+          if (localTotal > 0 && (remoteTotal <= 0 || (merged['order_type'] == 'Quick Order' && localTotal != remoteTotal))) {
+            merged['total_amount'] = localTotal;
+          }
+        }
+        await _deleteLocalOrderDuplicate(db, merged);
+        await _cacheOrder(merged, [], 'synced');
       }
       await _dbHelper.updateLastSynced('orders_$customerPhone');
       debugPrint('[Cache] Orders revalidation success.');
@@ -476,7 +543,7 @@ class CachingOrderRepository implements OrderRepository {
       return cachedData;
     }
     
-    debugPrint('[Cache] Order detail cache hit (stale). Revalidating...');
+    debugPrint('[Cache] Order detail cache hit (stale). Revalidating in background...');
     _revalidateOrderById(id, onRefresh);
     return cachedData;
   }
@@ -485,11 +552,20 @@ class CachingOrderRepository implements OrderRepository {
     try {
       final order = await _remote.getOrderById(id);
       if (order != null) {
-        await _cacheOrder(order, [], 'synced');
+        final localExisting = await _local.getOrderById(id);
+        final Map<String, dynamic> merged = Map<String, dynamic>.from(order);
+        if (localExisting != null) {
+          merged['order_type'] = localExisting['order_type'] ?? merged['order_type'];
+          final localTotal = (localExisting['total_amount'] as num?)?.toDouble() ?? 0.0;
+          if (localTotal > 0 && merged['order_type'] == 'Quick Order') {
+            merged['total_amount'] = localTotal;
+          }
+        }
+        await _cacheOrder(merged, [], 'synced');
         await _dbHelper.updateLastSynced('order_detail_$id');
         debugPrint('[Cache] Order detail revalidation success.');
         if (onRefresh != null) {
-          onRefresh(order);
+          onRefresh(merged);
         }
       }
     } catch (e) {
@@ -532,6 +608,13 @@ class CachingOrderRepository implements OrderRepository {
 
   Future<void> _revalidateOrderItems(String orderId, Function(List<Map<String, dynamic>>)? onRefresh) async {
     try {
+      final localItems = await _local.getOrderItems(orderId);
+      if (localItems.isNotEmpty) {
+        if (onRefresh != null) {
+          onRefresh(localItems);
+        }
+        return;
+      }
       final remoteItems = await _remote.getOrderItems(orderId);
       if (remoteItems.isNotEmpty) {
         await _cacheOrderItems(orderId, remoteItems);
@@ -552,22 +635,31 @@ class CachingOrderRepository implements OrderRepository {
       final batch = db.batch();
       batch.delete('order_items', where: 'order_id = ?', whereArgs: [orderId]);
       for (final item in items) {
+        final String itemId = (item['id'] != null && item['id'].toString().isNotEmpty)
+            ? item['id'].toString()
+            : const Uuid().v4();
+
+        double price = (item['price'] as num?)?.toDouble() ?? 0.0;
+        final double qty = (item['quantity'] as num?)?.toDouble() ?? 0.0;
+        double totalPrice = (item['total_price'] as num?)?.toDouble() ?? (qty * price);
+
         batch.insert(
           'order_items',
           {
-            'id': item['id'],
+            'id': itemId,
             'order_id': orderId,
             'product_id': item['product_id'],
             'product_name': item['product_name'],
-            'price': (item['price'] as num?)?.toDouble() ?? 0.0,
-            'quantity': (item['quantity'] as num?)?.toDouble() ?? 0.0,
+            'price': price,
+            'quantity': qty,
             'unit': item['unit'],
-            'total_price': (item['total_price'] as num?)?.toDouble() ?? 0.0,
+            'total_price': totalPrice,
           },
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
       }
       await batch.commit(noResult: true);
+      debugPrint('CachingOrder: Successfully cached ${items.length} items for order $orderId');
     } catch (e) {
       debugPrint('CachingOrder: SQLite order items cache failed: $e');
     }
@@ -603,6 +695,9 @@ class CachingOrderRepository implements OrderRepository {
         },
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
+      if (items.isNotEmpty && order['id'] != null) {
+        await _cacheOrderItems(order['id'].toString(), items);
+      }
     } catch (e) {
       debugPrint('CachingOrder: SQLite order cache failed: $e');
     }
@@ -738,12 +833,13 @@ class CachingCustomerRepository implements CustomerRepository {
       final customer = await _remote.registerGuest(name, phone, address);
       if (customer != null) {
         await _cacheCustomer(customer);
+        return customer;
       }
-      return customer;
     } catch (e) {
       debugPrint('CachingCustomer: Supabase registerGuest failed, trying local: $e');
-      return await _local.registerGuest(name, phone, address);
     }
+    final localCustomer = await _local.registerGuest(name, phone, address);
+    return localCustomer;
   }
 
   @override
@@ -768,7 +864,18 @@ class CachingCustomerRepository implements CustomerRepository {
     final cachedData = await _local.getLoggedInCustomer();
     
     // 2. Check if cache is stale (TTL for customer profile is 5 minutes)
-    final bool isStale = await _dbHelper.isCacheStale('customer_profile', const Duration(minutes: 5));
+    bool isStale = await _dbHelper.isCacheStale('customer_profile', const Duration(minutes: 5));
+    
+    if (cachedData != null) {
+      final bool hasMissingRouteFields = 
+          (cachedData['area_id'] != null && cachedData['area_name'] == null) ||
+          (cachedData['road_id'] != null && cachedData['road_name'] == null) ||
+          (cachedData['sub_road_id'] != null && cachedData['sub_road_name'] == null);
+      if (hasMissingRouteFields) {
+        debugPrint('[Cache] Customer profile has missing route fields. Forcing revalidation.');
+        isStale = true;
+      }
+    }
     
     if (cachedData == null) {
       // Cache miss: block on remote fetch
@@ -867,6 +974,19 @@ class CachingCustomerRepository implements CustomerRepository {
   }
 
   @override
+  Future<void> deleteAccount() async {
+    try {
+      await _remote.deleteAccount();
+    } catch (_) {}
+    try {
+      await _local.deleteAccount();
+    } catch (_) {}
+    try {
+      await _dbHelper.clearUserData();
+    } catch (_) {}
+  }
+
+  @override
   Future<void> logout() async {
     try {
       await _remote.logout();
@@ -890,6 +1010,9 @@ class CachingCustomerRepository implements CustomerRepository {
         'area_id': customer['area_id'],
         'road_id': customer['road_id'],
         'sub_road_id': customer['sub_road_id'],
+        'area_name': customer['area_name'],
+        'road_name': customer['road_name'],
+        'sub_road_name': customer['sub_road_name'],
         'delivery_schedule': customer['delivery_schedule'] != null ? json.encode(customer['delivery_schedule']) : null,
         'cutoff_time': customer['cutoff_time'],
         'created_at': customer['created_at']?.toString(),

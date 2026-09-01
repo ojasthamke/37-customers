@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:intl/intl.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -45,8 +46,19 @@ class _ScheduleBannerState extends ConsumerState<ScheduleBanner> {
     final customer = ref.watch(authProvider).customer;
     if (customer == null) return const SizedBox.shrink();
 
-    final orderDays = customer['delivery_schedule'] as List<dynamic>?;
-    final cutoffTimeStr = customer['cutoff_time'] as String?;
+    List<dynamic>? orderDays;
+    final rawSchedule = customer['delivery_schedule'];
+    if (rawSchedule is List) {
+      orderDays = rawSchedule;
+    } else if (rawSchedule is String && rawSchedule.trim().isNotEmpty) {
+      try {
+        final decoded = json.decode(rawSchedule);
+        if (decoded is List) orderDays = decoded;
+      } catch (_) {
+        orderDays = rawSchedule.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+      }
+    }
+    final cutoffTimeStr = customer['cutoff_time']?.toString();
     
     final settingsAsync = ref.watch(appSettingsProvider);
     final bool isClosed = isStoreClosed(settingsAsync.valueOrNull);
@@ -106,8 +118,11 @@ class _ScheduleBannerState extends ConsumerState<ScheduleBanner> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            Wrap(
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 8,
+              runSpacing: 6,
               children: [
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
@@ -235,8 +250,11 @@ class _ScheduleBannerState extends ConsumerState<ScheduleBanner> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                Wrap(
+                  alignment: WrapAlignment.spaceBetween,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 8,
+                  runSpacing: 6,
                   children: [
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),

@@ -120,7 +120,8 @@ class OrderDetailsScreen extends ConsumerWidget {
                           }
                           final currentProducts = List<Map<String, dynamic>>.from(response);
                           if (context.mounted) {
-                            _showReorderDialog(context, ref, details.items, currentProducts);
+                            _showReorderDialog(context, ref, details.items, currentProducts, orderType: details.order['order_type']?.toString());
+
                           }
                         } catch (e) {
                           if (context.mounted) {
@@ -1273,18 +1274,39 @@ class OrderDetailsScreen extends ConsumerWidget {
   }
 
   void _showReorderDialog(BuildContext context, WidgetRef ref, List<dynamic> items,
-      List<Map<String, dynamic>> currentProducts) {
+      List<Map<String, dynamic>> currentProducts, {String? orderType}) {
+    final bool isQuick = orderType == 'Quick Order';
     final Map<String, Map<String, dynamic>> selectedItems = {};
     for (var item in items) {
-      final pid = item['product_id'] as String;
-      final currentProd = currentProducts.firstWhere((p) => p['id'] == pid, orElse: () => {});
-      if (currentProd.isEmpty || currentProd['is_enabled'] == false || currentProd['is_available'] == false) {
+      final pid = item['product_id']?.toString() ?? '';
+      if (pid.isEmpty) continue;
+      final currentProd = currentProducts.firstWhere(
+        (p) => (p['id']?.toString() ?? '') == pid,
+        orElse: () => {},
+      );
+      if (currentProd.isEmpty || currentProd['is_enabled'] == false) {
         continue;
       }
+      if (isQuick) {
+        final onStock = (currentProd['order_now_stock'] as num?)?.toDouble() ?? 0.0;
+        final isAvail = (currentProd['order_now_is_available'] == null ||
+            currentProd['order_now_is_available'] == true ||
+            currentProd['order_now_is_available'] == 1) && onStock > 0;
+        if (!isAvail) continue;
+      } else {
+        final st = (currentProd['stock'] as num?)?.toDouble() ?? 0.0;
+        final isAvail = (currentProd['is_available'] == true || currentProd['is_available'] == 1) && st > 0;
+        if (!isAvail) continue;
+      }
+
+      final price = isQuick
+          ? ((currentProd['order_now_price'] as num?)?.toDouble() ?? (currentProd['price'] as num?)?.toDouble() ?? 0.0)
+          : ((currentProd['price'] as num?)?.toDouble() ?? 0.0);
+
       selectedItems[pid] = {
         'product_id': pid,
         'product_name': currentProd['name'] ?? item['product_name'] ?? 'N/A',
-        'price': (currentProd['price'] as num?)?.toDouble() ?? 0.0,
+        'price': price,
         'unit': currentProd['unit'] ?? item['unit'] ?? '',
         'quantity': (item['quantity'] as num?)?.toDouble() ?? 1.0,
       };
@@ -1358,7 +1380,7 @@ class OrderDetailsScreen extends ConsumerWidget {
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Text(
-                          'Reorder Items',
+                          isQuick ? 'Reorder Express Items' : 'Reorder Items',
                           style: GoogleFonts.outfit(
                             fontSize: 20,
                             fontWeight: FontWeight.bold,
@@ -1460,7 +1482,7 @@ class OrderDetailsScreen extends ConsumerWidget {
                       onPressed: selectedItems.isEmpty
                           ? null
                           : () {
-                              final cartNotifier = ref.read(cartProvider.notifier);
+                              final cartNotifier = ref.read(isQuick ? quickCartProvider.notifier : cartProvider.notifier);
                               for (var item in selectedItems.values) {
                                 cartNotifier.addItem(
                                   productId: item['product_id'],
@@ -1468,14 +1490,22 @@ class OrderDetailsScreen extends ConsumerWidget {
                                   price: item['price'],
                                   unit: item['unit'],
                                   quantity: item['quantity'],
+                                  isOrderNow: isQuick,
                                 );
                               }
 
-                               ref.read(cartOriginTabProvider.notifier).state = 3;
-                               ref.read(isViewingQuickOrderCartProvider.notifier).state = false;
-                               ref.read(activeTabProvider.notifier).state = 1;
+                              ref.read(cartOriginTabProvider.notifier).state = 3;
+                              ref.read(isViewingQuickOrderCartProvider.notifier).state = isQuick;
+                              ref.read(activeTabProvider.notifier).state = 1;
                               Navigator.pop(context);
-                              Navigator.pop(context);
+                              if (Navigator.of(context).canPop()) {
+                                Navigator.of(context).pop();
+                              } else {
+                                Navigator.of(context).pushAndRemoveUntil(
+                                  MaterialPageRoute(builder: (context) => const HomeScreen()),
+                                  (route) => false,
+                                );
+                              }
 
                               ScaffoldMessenger.of(context).showSnackBar(
                                 const SnackBar(
@@ -1499,3 +1529,4 @@ class OrderDetailsScreen extends ConsumerWidget {
     );
   }
 }
+

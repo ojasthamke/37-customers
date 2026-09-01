@@ -6,8 +6,10 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:uuid/uuid.dart';
 import '../auth/auth_provider.dart';
 import '../cart/cart_provider.dart';
+import '../catalog/catalog_provider.dart';
 import '../order/order_provider.dart';
 import '../../core/widgets/quantity_selector.dart';
+
 import '../../core/widgets/ambient_background.dart';
 import '../../core/services/notification_service.dart';
 import '../../core/utils/schedule_helper.dart';
@@ -57,6 +59,8 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
   }
 
   void _placeOrder() async {
+    if (_isPlacingOrder) return;
+
     final customer = ref.read(authProvider).customer;
     if (customer == null) return;
 
@@ -74,23 +78,50 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
       return;
     }
 
+    setState(() {
+      _isPlacingOrder = true;
+    });
+
     // Stock, Availability & Price Validation before placing order
     try {
       final client = Supabase.instance.client;
       final List<dynamic> remoteProducts = await client
           .from('products')
-          .select('id, price, is_available, description')
+          .select('id, price, is_available, is_enabled, description, order_now_price, order_now_stock, order_now_is_available')
           .inFilter('id', cart.items.keys.toList());
+
+      // Check if any cart item was deleted from the server
+      final foundIds = remoteProducts.map((p) => p['id']?.toString()).toSet();
+      for (final localId in cart.items.keys) {
+        if (!foundIds.contains(localId)) {
+          if (!mounted) return;
+          setState(() { _isPlacingOrder = false; });
+          final deletedItem = cart.items[localId];
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('${deletedItem?.productName ?? 'A product'} is no longer available. Please remove it from cart.'),
+              backgroundColor: Colors.red,
+            ),
+          );
+          return; // Block order placement!
+        }
+      }
 
       bool priceChanged = false;
       for (final p in remoteProducts) {
         final String id = p['id'] as String;
-        final bool isAvailable = (p['is_available'] == true || p['is_available'] == 1);
         final localItem = cart.items[id];
         if (localItem == null) continue;
 
+        final bool isAvailable = localItem.isOrderNow
+            ? ((p['order_now_is_available'] == null || p['order_now_is_available'] == true || p['order_now_is_available'] == 1) &&
+                (p['is_enabled'] == null || p['is_enabled'] == true || p['is_enabled'] == 1))
+            : ((p['is_available'] == true || p['is_available'] == 1) &&
+                (p['is_enabled'] == null || p['is_enabled'] == true || p['is_enabled'] == 1));
+
         if (!isAvailable) {
           if (!mounted) return;
+          setState(() { _isPlacingOrder = false; });
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text('${localItem.productName} is currently out of stock. Please remove it from cart.'),
@@ -100,29 +131,47 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
           return; // Block order placement!
         }
 
-        // Check stock levels from description JSON object
-        final descStr = p['description']?.toString() ?? '';
-        if (descStr.isNotEmpty && descStr.startsWith('{')) {
-          try {
-            final descObj = jsonDecode(descStr);
-            if (descObj['stock'] != null) {
-              final double stock = (descObj['stock'] as num).toDouble();
-              if (localItem.quantity > stock) {
-                if (!mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text('Insufficient stock for ${localItem.productName} (Available: ${stock.toInt()} ${localItem.unit}). Please adjust quantity.'),
-                    backgroundColor: Colors.red,
-                  ),
-                );
-                return; // Block order placement!
+        // Check stock levels
+        double stock = 0.0;
+        if (localItem.isOrderNow) {
+          stock = (p['order_now_stock'] as num?)?.toDouble() ?? 0.0;
+        } else {
+          final descStr = p['description']?.toString() ?? '';
+          if (descStr.isNotEmpty && descStr.startsWith('{')) {
+            try {
+              final descObj = jsonDecode(descStr);
+              if (descObj['stock'] != null) {
+                stock = (descObj['stock'] as num).toDouble();
               }
-            }
-          } catch (_) {}
+            } catch (_) {}
+          } else if (p['stock'] != null) {
+            stock = (p['stock'] as num).toDouble();
+          }
         }
 
-        final double remotePrice = (p['price'] as num).toDouble();
-        if (localItem.price != remotePrice) {
+        if (stock <= 0 || localItem.quantity > stock) {
+          if (!mounted) return;
+          setState(() { _isPlacingOrder = false; });
+          final formattedStock = (stock % 1 == 0) ? stock.toInt().toString() : stock.toStringAsFixed(2);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(stock <= 0
+                  ? '${localItem.productName} is out of stock. Please remove it from cart.'
+                  : 'Insufficient stock for ${localItem.productName} (Available: $formattedStock ${localItem.unit}). Please adjust quantity.'),
+              backgroundColor: Colors.red,
+            ),
+          );
+          return; // Block order placement!
+        }
+
+        // Price validation
+        final double remotePrice = localItem.isOrderNow
+            ? (((p['order_now_price'] as num?)?.toDouble() ?? 0.0) > 0
+                ? (p['order_now_price'] as num).toDouble()
+                : (p['price'] as num).toDouble())
+            : (p['price'] as num).toDouble();
+
+        if ((localItem.price - remotePrice).abs() > 0.01) {
           ref.read(activeCartNotifierProvider).updateItemPrice(id, remotePrice);
           priceChanged = true;
         }
@@ -130,6 +179,7 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
 
       if (priceChanged) {
         if (!mounted) return;
+        setState(() { _isPlacingOrder = false; });
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Some product prices have changed. Your cart has been updated. Please review before proceeding.'),
@@ -142,10 +192,6 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
     } catch (e) {
       debugPrint('Online stock/price check error: $e');
     }
-
-    setState(() {
-      _isPlacingOrder = true;
-    });
 
     final name = customer['name'] ?? '';
     final phone = customer['phone'] ?? '';
@@ -194,8 +240,9 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
 
     if (isOrderNow) {
       orderType = 'Quick Order';
-      orderTakingDateStr = _formatDate(DateTime.now());
-      deliveryDateStr = _formatDate(DateTime.now());
+      final now = AreaScheduleHelper.getKolkataTime();
+      orderTakingDateStr = _formatDate(now);
+      deliveryDateStr = _formatDate(now);
     } else {
       details = AreaScheduleHelper.calculateDetails(
         customer['delivery_schedule'] as List<dynamic>?,
@@ -288,7 +335,9 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
       String errorMsg = e.toString();
       if (errorMsg.contains('Insufficient stock')) {
         errorMsg = 'Some items no longer have enough stock. Please review your cart.';
-      } else if (errorMsg.contains('Product is unavailable')) {
+      } else if (errorMsg.contains('is unavailable for Quick Order')) {
+        errorMsg = 'Some items in your cart are no longer available for Quick Order. Please review your cart.';
+      } else if (errorMsg.contains('is out of stock') || errorMsg.contains('Product is unavailable') || errorMsg.contains('is unavailable')) {
         errorMsg = 'Some items are no longer available. Please review your cart.';
       } else {
         errorMsg = 'Failed to place order: ${errorMsg.replaceAll('PostgrestException(', '').replaceAll(')', '')}';
@@ -310,6 +359,8 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
     final customer = ref.watch(authProvider).customer;
     final settings = ref.watch(appSettingsProvider).valueOrNull;
     final bool isClosed = isStoreClosed(settings);
+    final bool isOrderNow = cart.items.values.any((item) => item.isOrderNow);
+    final allProducts = ref.watch(allProductsProvider).valueOrNull ?? [];
 
     if (cart.items.isEmpty) {
       return AmbientBackground(
@@ -339,6 +390,7 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
     const Color textColorPrimary = Color(0xFF0F172A);
     const Color textColorSecondary = Color(0xFF64748B);
     const Color accentGreen = Color(0xFF059669);
+
 
     return AmbientBackground(
       child: Scaffold(
@@ -729,50 +781,99 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
                                     final item = cart.items.values.toList()[index];
                                     final displayPrice = adjustedPrices[item.productId] ?? item.totalPrice;
 
-                                    return Row(
-                                      children: [
-                                        Container(
-                                          width: 8,
-                                          height: 8,
-                                          decoration: const BoxDecoration(
-                                            color: accentGreen,
-                                            shape: BoxShape.circle,
+                                    final matching = allProducts.firstWhere(
+                                      (p) => p['id']?.toString() == item.productId,
+                                      orElse: () => <String, dynamic>{},
+                                    );
+                                    final double st = item.isOrderNow
+                                        ? ((matching['order_now_stock'] as num?)?.toDouble() ?? 0.0)
+                                        : ((matching['stock'] as num?)?.toDouble() ?? 0.0);
+                                    final bool isAvail = item.isOrderNow
+                                        ? ((matching['order_now_is_available'] == null ||
+                                                matching['order_now_is_available'] == true ||
+                                                matching['order_now_is_available'] == 1) &&
+                                            (matching['is_enabled'] == null ||
+                                                matching['is_enabled'] == true ||
+                                                matching['is_enabled'] == 1) &&
+                                            st > 0)
+                                        : ((matching['is_available'] == true || matching['is_available'] == 1) &&
+                                            (matching['is_enabled'] == null ||
+                                                matching['is_enabled'] == true ||
+                                                matching['is_enabled'] == 1) &&
+                                            st > 0);
+                                    final bool isItemStockOut = matching.isNotEmpty && !isAvail;
+
+                                    return Container(
+                                      padding: isItemStockOut ? const EdgeInsets.all(8) : EdgeInsets.zero,
+                                      decoration: isItemStockOut
+                                          ? BoxDecoration(
+                                              color: const Color(0xFFFEF2F2),
+                                              borderRadius: BorderRadius.circular(10),
+                                              border: Border.all(color: const Color(0xFFEF4444), width: 1.2),
+                                            )
+                                          : null,
+                                      child: Row(
+                                        children: [
+                                          Container(
+                                            width: 8,
+                                            height: 8,
+                                            decoration: BoxDecoration(
+                                              color: isItemStockOut ? const Color(0xFFDC2626) : accentGreen,
+                                              shape: BoxShape.circle,
+                                            ),
                                           ),
-                                        ),
-                                        const SizedBox(width: 10),
-                                        Expanded(
-                                          child: RichText(
-                                            text: TextSpan(
+                                          const SizedBox(width: 10),
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
                                               children: [
-                                                TextSpan(
-                                                  text: item.productName,
-                                                  style: GoogleFonts.outfit(
-                                                    fontSize: 15,
-                                                    fontWeight: FontWeight.w600,
-                                                    color: textColorPrimary,
+                                                RichText(
+                                                  text: TextSpan(
+                                                    children: [
+                                                      TextSpan(
+                                                        text: item.productName,
+                                                        style: GoogleFonts.outfit(
+                                                          fontSize: 15,
+                                                          fontWeight: FontWeight.w600,
+                                                          color: isItemStockOut ? const Color(0xFF991B1B) : textColorPrimary,
+                                                          decoration: isItemStockOut ? TextDecoration.lineThrough : null,
+                                                        ),
+                                                      ),
+                                                      TextSpan(
+                                                        text: '  (${formatQuantity(item.quantity, item.unit)})',
+                                                        style: GoogleFonts.inter(
+                                                          fontSize: 13,
+                                                          fontWeight: FontWeight.w500,
+                                                          color: isItemStockOut ? const Color(0xFFB91C1C) : textColorSecondary,
+                                                        ),
+                                                      ),
+                                                    ],
                                                   ),
                                                 ),
-                                                TextSpan(
-                                                  text: '  (${formatQuantity(item.quantity, item.unit)})',
-                                                  style: GoogleFonts.inter(
-                                                    fontSize: 13,
-                                                    fontWeight: FontWeight.w500,
-                                                    color: textColorSecondary,
+                                                if (isItemStockOut) ...[
+                                                  const SizedBox(height: 2),
+                                                  Text(
+                                                    '⚠️ Currently Out of Stock',
+                                                    style: GoogleFonts.inter(
+                                                      fontSize: 11,
+                                                      fontWeight: FontWeight.bold,
+                                                      color: const Color(0xFFDC2626),
+                                                    ),
                                                   ),
-                                                ),
+                                                ],
                                               ],
                                             ),
                                           ),
-                                        ),
-                                        Text(
-                                          '₹${displayPrice.toStringAsFixed(0)}',
-                                          style: GoogleFonts.outfit(
-                                            fontSize: 15.5,
-                                            fontWeight: FontWeight.bold,
-                                            color: textColorPrimary,
+                                          Text(
+                                            '₹${_formatCurrency(displayPrice)}',
+                                            style: GoogleFonts.outfit(
+                                              fontSize: 15.5,
+                                              fontWeight: FontWeight.bold,
+                                              color: isItemStockOut ? const Color(0xFFDC2626) : textColorPrimary,
+                                            ),
                                           ),
-                                        ),
-                                      ],
+                                        ],
+                                      ),
                                     );
                                   },
                                 ),
@@ -794,7 +895,7 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
                                       ),
                                     ),
                                     Text(
-                                      '₹${(cart.roundedGrandTotal - cart.deliveryCharge).toStringAsFixed(0)}',
+                                      '₹${_formatCurrency(cart.subtotal)}',
                                       style: GoogleFonts.outfit(
                                         fontSize: 15,
                                         fontWeight: FontWeight.w600,
@@ -834,7 +935,7 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
                                             ),
                                           )
                                         : Text(
-                                            '₹${cart.deliveryCharge.toStringAsFixed(0)}',
+                                            '₹${_formatCurrency(cart.deliveryCharge)}',
                                             style: GoogleFonts.outfit(
                                               fontSize: 15,
                                               fontWeight: FontWeight.w600,
@@ -884,7 +985,7 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
                                       ],
                                     ),
                                     Text(
-                                      '₹${cart.roundedGrandTotal.toStringAsFixed(0)}',
+                                      '₹${_formatCurrency(cart.grandTotal)}',
                                       style: GoogleFonts.outfit(
                                         fontSize: 24,
                                         fontWeight: FontWeight.w800,
@@ -934,7 +1035,7 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
                             borderRadius: BorderRadius.circular(28),
                           ),
                         ),
-                        onPressed: isClosed || _scheduleDetails == null || _scheduleDetails!.state == ScheduleState.noSchedule
+                        onPressed: _isPlacingOrder || isClosed || (!isOrderNow && (_scheduleDetails == null || _scheduleDetails!.state == ScheduleState.noSchedule))
                             ? null
                             : () {
                                 HapticFeedback.mediumImpact();
@@ -944,11 +1045,15 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Text(
-                              isClosed
-                                  ? 'STORE CLOSED'
-                                  : _scheduleDetails?.state == ScheduleState.closedToday
-                                      ? 'CONFIRM PRE-ORDER'
-                                      : 'PLACE ORDER',
+                              _isPlacingOrder
+                                  ? 'PLACING ORDER...'
+                                  : isClosed
+                                      ? 'STORE CLOSED'
+                                      : isOrderNow
+                                          ? 'PLACE QUICK ORDER'
+                                          : _scheduleDetails?.state == ScheduleState.closedToday
+                                              ? 'CONFIRM PRE-ORDER'
+                                              : 'PLACE ORDER',
                               style: GoogleFonts.outfit(
                                 fontSize: 16.5,
                                 fontWeight: FontWeight.bold,
@@ -977,5 +1082,16 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
               ),
         ),
       );
+  }
+
+  String _formatCurrency(double amount) {
+    if ((amount - amount.roundToDouble()).abs() < 0.01) {
+      return amount.round().toString();
+    }
+    final s = amount.toStringAsFixed(2);
+    if (s.endsWith('.00')) {
+      return amount.round().toString();
+    }
+    return s;
   }
 }

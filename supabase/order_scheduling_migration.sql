@@ -83,10 +83,11 @@ BEGIN
   end if;
 
   -- Fetch route mapping from customer profile
-  SELECT name, phone, area_id, road_id, sub_road_id
-  INTO v_customer_name, v_customer_phone, v_area_id, v_road_id, v_sub_road_id
+  SELECT id, name, phone, area_id, road_id, sub_road_id
+  INTO v_customer_id, v_customer_name, v_customer_phone, v_area_id, v_road_id, v_sub_road_id
   FROM public.customers
-  WHERE id = v_customer_id;
+  WHERE id = auth.uid() OR auth_user_id = auth.uid()
+  LIMIT 1;
 
   -- Verify that the customer profile exists
   if v_customer_name is null then
@@ -246,33 +247,79 @@ BEGIN
       raise exception 'Quantity must be positive.';
     end if;
 
-    select name, price, unit, is_available, is_enabled, description
-    into v_product_name, v_price, v_unit, v_is_available, v_is_enabled, v_description
+    select name, price, unit, is_available, is_enabled, description,
+           order_now_price, order_now_stock, order_now_is_available
+    into v_product_name, v_price, v_unit, v_is_available, v_is_enabled, v_description,
+         v_order_now_price, v_order_now_stock, v_order_now_is_available
     from public.products
     where id = v_product_id
     for update;
 
-    if not found or not v_is_enabled or not v_is_available then
-      raise exception 'Product is unavailable.';
+    if not found or not coalesce(v_is_enabled, true) then
+      raise exception 'Product % is unavailable or disabled.', coalesce(v_product_name, 'Selected item');
     end if;
 
-    v_stock := null;
-    if v_description is not null and v_description ~ '^\s*\{.*\}\s*$' then
-      begin
-        v_stock := (v_description::jsonb->>'stock')::numeric;
-      exception when others then
-        v_stock := null;
-      end;
-    end if;
+    -- Distinct separation: Quick Order vs Normal / Pre-Order
+    IF p_order_type IN ('Quick Order', 'Quick Delivery', 'Order Now') THEN
+      -- Quick Order availability & stock check (STRICTLY INDEPENDENT of Home section)
+      IF NOT coalesce(v_order_now_is_available, true) THEN
+        RAISE EXCEPTION 'Product % is unavailable for Quick Order.', v_product_name;
+      END IF;
 
-    if v_stock is not null then
-      if v_stock < v_quantity then
-        raise exception 'Insufficient stock for product %: requested %, available %', v_product_name, v_quantity, v_stock;
-      end if;
+      -- Quick Order price resolution
+      IF (v_item->>'price') IS NOT NULL AND (v_item->>'price')::numeric > 0 THEN
+        v_price := (v_item->>'price')::numeric;
+      ELSIF v_order_now_price IS NOT NULL AND v_order_now_price > 0 THEN
+        v_price := v_order_now_price;
+      END IF;
+
+      -- Quick Order stock resolution
+      IF v_order_now_stock IS NOT NULL THEN
+        v_stock := v_order_now_stock;
+      ELSE
+        v_stock := NULL;
+      END IF;
+    ELSE
+      -- Normal / Pre-Order availability check (Home section)
+      IF NOT coalesce(v_is_available, true) THEN
+        RAISE EXCEPTION 'Product % is out of stock.', v_product_name;
+      END IF;
+
+      -- Normal order price resolution
+      IF (v_item->>'price') IS NOT NULL AND (v_item->>'price')::numeric > 0 THEN
+        v_price := (v_item->>'price')::numeric;
+      END IF;
+
+      -- Normal order stock resolution from description JSON or column
+      v_stock := NULL;
+      IF v_description IS NOT NULL AND v_description ~ '^\s*\{.*\}\s*$' THEN
+        BEGIN
+          v_stock := (v_description::jsonb->>'stock')::numeric;
+        EXCEPTION WHEN OTHERS THEN
+          v_stock := NULL;
+        END;
+      END IF;
+    END IF;
+
+    -- Deduct stock and update section-specific availability
+    IF v_stock IS NOT NULL THEN
+      IF v_stock < v_quantity THEN
+        RAISE EXCEPTION 'Insufficient stock for product %: requested %, available %', v_product_name, v_quantity, v_stock;
+      END IF;
       v_new_stock := v_stock - v_quantity;
-      v_updated_description := (v_description::jsonb || jsonb_build_object('stock', v_new_stock))::text;
-      update public.products set description = v_updated_description, is_available = (v_new_stock > 0) where id = v_product_id;
-    end if;
+      IF p_order_type IN ('Quick Order', 'Quick Delivery', 'Order Now') THEN
+        UPDATE public.products 
+        SET order_now_stock = v_new_stock, 
+            order_now_is_available = (v_new_stock > 0) 
+        WHERE id = v_product_id;
+      ELSE
+        v_updated_description := (v_description::jsonb || jsonb_build_object('stock', v_new_stock))::text;
+        UPDATE public.products 
+        SET description = v_updated_description, 
+            is_available = (v_new_stock > 0) 
+        WHERE id = v_product_id;
+      END IF;
+    END IF;
 
     v_item_total := v_quantity * v_price;
     v_total_amount := v_total_amount + v_item_total;
@@ -282,15 +329,30 @@ BEGIN
   end loop;
 
   -- Apply delivery charge
-  select value::numeric into v_delivery_charge from public.settings where key = 'delivery_charge';
-  if v_delivery_charge is null then
-    v_delivery_charge := 30.00;
-  end if;
+  IF p_order_type IN ('Quick Order', 'Quick Delivery', 'Order Now') THEN
+    select value::numeric into v_delivery_charge from public.settings where key = 'order_now_delivery_charge';
+    if v_delivery_charge is null then
+      select value::numeric into v_delivery_charge from public.settings where key = 'quick_delivery_charge';
+    end if;
+    if v_delivery_charge is null then
+      v_delivery_charge := 10.00;
+    end if;
 
-  select value::numeric into v_free_delivery_threshold from public.settings where key = 'free_delivery_threshold';
-  if v_free_delivery_threshold is null then
-    v_free_delivery_threshold := 300.00;
-  end if;
+    select value::numeric into v_free_delivery_threshold from public.settings where key = 'order_now_free_delivery_threshold';
+    if v_free_delivery_threshold is null then
+      v_free_delivery_threshold := 100000.00;
+    end if;
+  ELSE
+    select value::numeric into v_delivery_charge from public.settings where key = 'delivery_charge';
+    if v_delivery_charge is null then
+      v_delivery_charge := 30.00;
+    end if;
+
+    select value::numeric into v_free_delivery_threshold from public.settings where key = 'free_delivery_threshold';
+    if v_free_delivery_threshold is null then
+      v_free_delivery_threshold := 300.00;
+    end if;
+  END IF;
 
   if v_total_amount > 0 and v_total_amount < v_free_delivery_threshold then
     v_total_amount := v_total_amount + v_delivery_charge;

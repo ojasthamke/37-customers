@@ -12,17 +12,23 @@ class AreaScheduleHelper {
   ];
 
   /// Returns the current time converted to the authoritative Indian Standard Time (UTC+5:30)
-  static DateTime getKolkataTime() {
-    return DateTime.now().toUtc().add(const Duration(hours: 5, minutes: 30));
+  static DateTime getKolkataTime([DateTime? customNow]) {
+    final base = customNow ?? DateTime.now();
+    return base.toUtc().add(const Duration(hours: 5, minutes: 30));
   }
 
   /// Calculates order schedule details for the given list of order-taking days and optional cutoff time string (e.g. "20:00:00")
-  static ScheduleDetails calculateDetails(List<dynamic>? orderDays, {String? cutoffTimeStr, bool isStoreClosed = false}) {
+  static ScheduleDetails calculateDetails(
+    List<dynamic>? orderDays, {
+    String? cutoffTimeStr,
+    bool isStoreClosed = false,
+    DateTime? customNow,
+  }) {
     if (orderDays == null || orderDays.isEmpty) {
       return ScheduleDetails(state: ScheduleState.noSchedule);
     }
 
-    final now = getKolkataTime();
+    final now = getKolkataTime(customNow);
     
     // Normalise order days to match case
     final Set<String> activeDays = orderDays
@@ -38,19 +44,25 @@ class AreaScheduleHelper {
     final todayName = weekdays[now.weekday - 1];
     final isOrderDayToday = activeDays.contains(todayName) && !isStoreClosed;
 
-    // Parse cutoff time (defaulting to 23:59)
+    // Parse cutoff time (defaulting to 23:59:00)
     int cutoffHour = 23;
     int cutoffMinute = 59;
+    int cutoffSecond = 0;
     if (cutoffTimeStr != null && cutoffTimeStr.isNotEmpty) {
       final parts = cutoffTimeStr.split(':');
-      if (parts.length >= 2) {
+      if (parts.isNotEmpty) {
         cutoffHour = int.tryParse(parts[0]) ?? 23;
+      }
+      if (parts.length >= 2) {
         cutoffMinute = int.tryParse(parts[1]) ?? 59;
+      }
+      if (parts.length >= 3) {
+        cutoffSecond = int.tryParse(parts[2]) ?? 0;
       }
     }
 
     // Cutoff time today (in Kolkata timezone, represented as UTC datetime)
-    final cutoffTime = DateTime.utc(now.year, now.month, now.day, cutoffHour, cutoffMinute, 0);
+    final cutoffTime = DateTime.utc(now.year, now.month, now.day, cutoffHour, cutoffMinute, cutoffSecond);
 
     if (isOrderDayToday && now.isBefore(cutoffTime)) {
       final remaining = cutoffTime.difference(now);
@@ -87,8 +99,8 @@ class AreaScheduleHelper {
 
   /// Formats a DateTime to "DayName, DD MonthName" format, e.g. "Tuesday, 26 August"
   /// If the date is tomorrow (based on getKolkataTime()), it returns "Tomorrow, DD MonthName"
-  static String formatDayAndDate(DateTime date) {
-    final now = getKolkataTime();
+  static String formatDayAndDate(DateTime date, [DateTime? customNow]) {
+    final now = getKolkataTime(customNow);
     final tomorrow = now.add(const Duration(days: 1));
     final isDateTomorrow = date.year == tomorrow.year && date.month == tomorrow.month && date.day == tomorrow.day;
     if (isDateTomorrow) {
@@ -99,6 +111,7 @@ class AreaScheduleHelper {
 
   /// Formats Duration to HH:MM:SS format
   static String formatDuration(Duration duration) {
+    if (duration.isNegative) return '00:00:00';
     String twoDigits(int n) => n.toString().padLeft(2, '0');
     final hours = twoDigits(duration.inHours);
     final minutes = twoDigits(duration.inMinutes.remainder(60));

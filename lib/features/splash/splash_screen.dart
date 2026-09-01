@@ -57,11 +57,11 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
 
     if (!mounted) return;
 
-    // Hardened App Startup: Validate and refresh real session credentials, handling key corruption
+    // Hardened App Startup: Validate and refresh real session credentials with timeout
     try {
       final auth = Supabase.instance.client.auth;
       if (auth.currentSession != null) {
-        await auth.refreshSession();
+        await auth.refreshSession().timeout(const Duration(seconds: 3));
         debugPrint('Secure session refreshed successfully. User ID: ${auth.currentSession?.user.id}');
       }
     } on AuthException catch (e) {
@@ -73,9 +73,11 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
       debugPrint('Session refresh failed due to network or other error (ignored for offline access): $e');
     }
 
-    // Wait until auth state has finished loading the cached session
-    while (ref.read(authProvider).isLoading) {
+    // Wait at most 1 second if auth state is still loading
+    int waitCount = 0;
+    while (ref.read(authProvider).isLoading && waitCount < 10) {
       await Future.delayed(const Duration(milliseconds: 100));
+      waitCount++;
       if (!mounted) return;
     }
 
@@ -105,6 +107,7 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
             child: Image.asset(
               'assets/splash_bg.jpg',
               fit: BoxFit.cover,
+              cacheWidth: 600,
               errorBuilder: (_, __, ___) => const SizedBox.shrink(),
             ),
           ),
@@ -129,6 +132,7 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
                   child: Image.asset(
                     'assets/orderkart_logo.png',
                     width: 240,
+                    cacheWidth: 480,
                     fit: BoxFit.contain,
                     errorBuilder: (_, __, ___) => const Column(
                       mainAxisSize: MainAxisSize.min,

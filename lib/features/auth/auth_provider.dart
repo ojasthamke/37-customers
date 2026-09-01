@@ -1,8 +1,15 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' hide AuthState;
 import '../../core/database/providers.dart';
 import '../../core/services/notification_service.dart';
 import '../../core/services/auth_rate_limiter.dart';
+import '../../core/services/login_tracker_service.dart';
+import '../catalog/catalog_provider.dart';
+import '../cart/cart_provider.dart';
+import '../order/order_provider.dart';
+import '../dashboard/home_screen.dart';
+
 
 class AuthState {
   final Map<String, dynamic>? customer;
@@ -29,7 +36,44 @@ class AuthNotifier extends StateNotifier<AuthState> {
   final Ref _ref;
 
   AuthNotifier(this._ref) : super(AuthState(isLoading: true)) {
-    // Listen to authentication state changes to preserve session on refresh
+    _initAuth();
+  }
+
+  Future<void> _initAuth() async {
+    try {
+      final currentSession = Supabase.instance.client.auth.currentSession;
+      if (currentSession != null) {
+        final repo = _ref.read(customerRepositoryProvider);
+        final customer = await repo.getLoggedInCustomer(onRefresh: (freshCustomer) {
+          state = AuthState(customer: freshCustomer, isLoading: false);
+        }).timeout(const Duration(seconds: 3), onTimeout: () => null);
+
+        if (customer != null) {
+          state = AuthState(customer: customer, isLoading: false);
+          try {
+            LoginTrackerService.instance.recordLogin(
+              customer: customer,
+              loginMethod: 'Session Restore',
+            );
+          } catch (_) {}
+          try {
+            final custId = customer['id'].toString();
+            NotificationService.instance.startRealtimeNotificationSync(customerId: custId);
+            NotificationService.instance.registerFCMToken(custId);
+          } catch (_) {}
+          _listenToAuthChanges();
+          return;
+        }
+      }
+    } catch (e) {
+      debugPrint('Initial auth session check error: $e');
+    }
+
+    state = AuthState(customer: null, isLoading: false);
+    _listenToAuthChanges();
+  }
+
+  void _listenToAuthChanges() {
     try {
       Supabase.instance.client.auth.onAuthStateChange.listen((data) async {
         final session = data.session;
@@ -43,9 +87,20 @@ class AuthNotifier extends StateNotifier<AuthState> {
             });
             if (customer != null) {
               state = AuthState(customer: customer, isLoading: false);
-              NotificationService.instance.registerFCMToken(customer['id']);
+              try {
+                LoginTrackerService.instance.recordLogin(
+                  customer: customer,
+                  loginMethod: 'Auth State Change',
+                );
+              } catch (_) {}
+              try {
+                final custId = customer['id'].toString();
+                NotificationService.instance.startRealtimeNotificationSync(customerId: custId);
+                NotificationService.instance.registerFCMToken(custId);
+              } catch (_) {}
               return;
             }
+
           } catch (_) {
             // Silent fallback on background session updates
           }
@@ -88,6 +143,12 @@ class AuthNotifier extends StateNotifier<AuthState> {
       if (customer != null) {
         await AuthRateLimiter.instance.recordSuccessfulLogin();
         state = AuthState(customer: customer, isLoading: false);
+        try {
+          LoginTrackerService.instance.recordLogin(
+            customer: customer,
+            loginMethod: 'Phone + Password',
+          );
+        } catch (_) {}
         NotificationService.instance.registerFCMToken(customer['id']);
         return true;
       } else {
@@ -115,6 +176,12 @@ class AuthNotifier extends StateNotifier<AuthState> {
       if (customer != null) {
         await AuthRateLimiter.instance.recordSuccessfulLogin();
         state = AuthState(customer: customer, isLoading: false);
+        try {
+          LoginTrackerService.instance.recordLogin(
+            customer: customer,
+            loginMethod: 'Customer Code',
+          );
+        } catch (_) {}
         NotificationService.instance.registerFCMToken(customer['id']);
         return true;
       } else {
@@ -143,6 +210,12 @@ class AuthNotifier extends StateNotifier<AuthState> {
       if (customer != null) {
         await AuthRateLimiter.instance.recordSuccessfulLogin();
         state = AuthState(customer: customer, isLoading: false);
+        try {
+          LoginTrackerService.instance.recordLogin(
+            customer: customer,
+            loginMethod: 'Code + Password',
+          );
+        } catch (_) {}
         NotificationService.instance.registerFCMToken(customer['id']);
         return true;
       } else {
@@ -172,6 +245,12 @@ class AuthNotifier extends StateNotifier<AuthState> {
       if (customer != null) {
         await AuthRateLimiter.instance.recordSuccessfulLogin();
         state = AuthState(customer: customer, isLoading: false);
+        try {
+          LoginTrackerService.instance.recordLogin(
+            customer: customer,
+            loginMethod: 'Password Setup',
+          );
+        } catch (_) {}
         NotificationService.instance.registerFCMToken(customer['id']);
         return true;
       } else {
@@ -204,6 +283,12 @@ class AuthNotifier extends StateNotifier<AuthState> {
       final customer = await repo.registerGuest(name, phone, address);
       if (customer != null) {
         state = AuthState(customer: customer, isLoading: false);
+        try {
+          LoginTrackerService.instance.recordLogin(
+            customer: customer,
+            loginMethod: 'Guest',
+          );
+        } catch (_) {}
         NotificationService.instance.registerFCMToken(customer['id']);
         return true;
       } else {
@@ -211,7 +296,8 @@ class AuthNotifier extends StateNotifier<AuthState> {
         return false;
       }
     } catch (e) {
-      state = AuthState(isLoading: false, error: e.toString());
+      final cleanErr = e.toString().replaceAll('Exception: ', '').trim();
+      state = AuthState(isLoading: false, error: cleanErr.isNotEmpty ? cleanErr : 'Guest registration failed.');
       return false;
     }
   }
@@ -231,6 +317,12 @@ class AuthNotifier extends StateNotifier<AuthState> {
       final customer = await repo.register(name, phone, password, address, areaId: areaId, roadId: roadId, subRoadId: subRoadId);
       if (customer != null) {
         state = AuthState(customer: customer, isLoading: false);
+        try {
+          LoginTrackerService.instance.recordLogin(
+            customer: customer,
+            loginMethod: 'Registration',
+          );
+        } catch (_) {}
         NotificationService.instance.registerFCMToken(customer['id']);
         return true;
       } else {
@@ -257,16 +349,29 @@ class AuthNotifier extends StateNotifier<AuthState> {
       final repo = _ref.read(customerRepositoryProvider);
       final id = state.customer!['id'];
       await repo.updateProfile(id, name, phone, address, areaId: areaId, roadId: roadId, subRoadId: subRoadId);
-      final updatedCustomer = {
-        ...state.customer!,
-        'name': name,
-        'phone': phone,
-        'address': address,
-        'area_id': areaId,
-        'road_id': roadId,
-        'sub_road_id': subRoadId,
-      };
-      state = AuthState(customer: updatedCustomer, isLoading: false);
+      
+      // Fetch fresh customer details with resolved area and route names, updating local SQLite cache
+      final freshCustomer = await repo.getLoggedInCustomer();
+      if (freshCustomer != null) {
+        state = AuthState(customer: freshCustomer, isLoading: false);
+        
+        // Invalidate cached providers so area changes reflect immediately
+        _ref.invalidate(categoriesProvider);
+        _ref.invalidate(popularProductsProvider);
+        _ref.invalidate(appSettingsProvider);
+        _ref.invalidate(activeCartNotifierProvider);
+      } else {
+        final updatedCustomer = {
+          ...state.customer!,
+          'name': name,
+          'phone': phone,
+          'address': address,
+          'area_id': areaId,
+          'road_id': roadId,
+          'sub_road_id': subRoadId,
+        };
+        state = AuthState(customer: updatedCustomer, isLoading: false);
+      }
     } catch (e) {
       state = state.copyWith(isLoading: false, error: e.toString());
     }
@@ -325,6 +430,30 @@ class AuthNotifier extends StateNotifier<AuthState> {
     }
   }
 
+  Future<void> deleteAccount() async {
+    state = state.copyWith(isLoading: true);
+    try {
+      final repo = _ref.read(customerRepositoryProvider);
+      final currentCust = state.customer;
+      if (currentCust != null && currentCust['id'] != null) {
+        await NotificationService.instance.clearFCMToken(currentCust['id']);
+      }
+      await repo.deleteAccount();
+    } catch (_) {
+    } finally {
+      _ref.read(cartProvider.notifier).clear();
+      _ref.read(quickCartProvider.notifier).clear();
+      _ref.invalidate(categoriesProvider);
+      _ref.invalidate(popularProductsProvider);
+      _ref.invalidate(appSettingsProvider);
+      _ref.invalidate(activeCartNotifierProvider);
+      _ref.invalidate(orderListProvider);
+      _ref.invalidate(lastOrderProvider);
+      _ref.read(activeTabProvider.notifier).state = 0;
+      state = AuthState(customer: null, isLoading: false);
+    }
+  }
+
   Future<void> logout() async {
     state = state.copyWith(isLoading: true);
     try {
@@ -334,6 +463,11 @@ class AuthNotifier extends StateNotifier<AuthState> {
         await NotificationService.instance.clearFCMToken(currentCust['id']);
       }
       await repo.logout();
+      _ref.read(cartProvider.notifier).clear();
+      _ref.read(quickCartProvider.notifier).clear();
+      _ref.invalidate(orderListProvider);
+      _ref.invalidate(lastOrderProvider);
+      _ref.read(activeTabProvider.notifier).state = 0;
       state = AuthState(customer: null, isLoading: false);
     } catch (e) {
       state = state.copyWith(isLoading: false, error: e.toString());

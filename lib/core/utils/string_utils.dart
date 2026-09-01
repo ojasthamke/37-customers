@@ -1,7 +1,18 @@
-String sanitizeCustomerName(String? name) {
+String sanitizeCustomerName(String? name, {String? customerCode}) {
   if (name == null || name.trim().isEmpty) return 'Guest';
   
   final trimmed = name.trim();
+  
+  // Prevent customer code from leaking as display name
+  if (customerCode != null && trimmed.toLowerCase() == customerCode.trim().toLowerCase()) {
+    return 'Customer';
+  }
+  
+  final codePattern = RegExp(r'^[A-Z]{2,4}\d{2,6}$', caseSensitive: false);
+  if (codePattern.hasMatch(trimmed)) {
+    return 'Customer';
+  }
+  
   final parts = trimmed.split(RegExp(r'\s+'));
   
   if (parts.length > 1) {

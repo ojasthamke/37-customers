@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -6,7 +7,11 @@ import 'package:intl/intl.dart';
 import 'order_provider.dart';
 import 'order_details_screen.dart';
 import '../auth/auth_provider.dart';
+import '../catalog/catalog_provider.dart';
+import '../cart/cart_provider.dart';
 import '../../core/widgets/ambient_background.dart';
+import '../../core/widgets/skeleton_loader.dart';
+
 
 class MyOrdersScreen extends ConsumerStatefulWidget {
   final bool showAppBar;
@@ -29,9 +34,7 @@ class _MyOrdersScreenState extends ConsumerState<MyOrdersScreen> {
     final ordersAsync = ref.watch(orderListProvider);
 
     Widget content = ordersAsync.when(
-      loading: () => const Center(
-        child: CircularProgressIndicator(color: brandPrimary),
-      ),
+      loading: () => SkeletonLoader.ordersList(count: 5),
       error: (err, stack) => Center(
         child: Padding(
           padding: const EdgeInsets.all(24.0),
@@ -199,14 +202,72 @@ class _MyOrdersScreenState extends ConsumerState<MyOrdersScreen> {
     }
   }
 
+  String _formatCurrency(double amount) {
+    if (amount == amount.roundToDouble()) {
+      return amount.toInt().toString();
+    }
+    return amount.toStringAsFixed(2);
+  }
+
   Widget _buildSubtleWhiteOrderCard(BuildContext context, Map<String, dynamic> order) {
     final orderDate = (DateTime.tryParse(order['order_date'] ?? '') ?? DateTime.now()).toLocal();
     final formattedDate = DateFormat('dd MMM yyyy • hh:mm a').format(orderDate);
     final orderNo = order['order_number'] ?? order['offline_order_no'] ?? 'OK-#';
     final isOffline = order['sync_status'] == 'pending' || order['sync_status'] == 'failed';
-    final totalAmount = (order['total_amount'] as num?)?.toDouble() ?? 0.0;
-    final itemsCount = (order['order_items'] as List<dynamic>?)?.length ?? 0;
+    double totalAmount = (order['total_amount'] as num?)?.toDouble() ?? 0.0;
+    int itemsCount = 0;
+    final rawItems = order['order_items'];
+    List<dynamic> itemsList = [];
+    if (rawItems is List) {
+      itemsList = rawItems;
+      itemsCount = rawItems.length;
+    } else if (rawItems is String && rawItems.trim().isNotEmpty) {
+      try {
+        final decoded = json.decode(rawItems);
+        if (decoded is List) {
+          itemsList = decoded;
+          itemsCount = decoded.length;
+        }
+      } catch (_) {}
+    }
+
+    final bool isQuickOrder = order['order_type'] == 'Quick Order';
+    if (isQuickOrder && itemsList.isNotEmpty) {
+      final allProducts = ref.watch(allProductsProvider).valueOrNull ?? [];
+      double quickSubtotal = 0.0;
+      for (final it in itemsList) {
+        if (it is Map) {
+          final pid = it['product_id']?.toString() ?? '';
+          final pName = it['product_name']?.toString().toLowerCase().trim() ?? '';
+          final prod = allProducts.firstWhere(
+            (p) => (p['id']?.toString() == pid) || (p['name']?.toString().toLowerCase().trim() == pName),
+            orElse: () => <String, dynamic>{},
+          );
+          double price = (it['price'] as num?)?.toDouble() ?? 0.0;
+          if (prod.isNotEmpty) {
+            final double onPrice = (prod['order_now_price'] as num?)?.toDouble() ?? 0.0;
+            if (onPrice > 0) price = onPrice;
+          }
+          final double qty = (it['quantity'] as num?)?.toDouble() ?? 1.0;
+          quickSubtotal += price * qty;
+        }
+      }
+      if (quickSubtotal > 0) {
+        final settings = ref.watch(appSettingsProvider).valueOrNull;
+        double quickDeliveryFee = 10.0;
+        if (settings != null && settings['order_now_delivery_charge'] != null) {
+          quickDeliveryFee = (double.tryParse(settings['order_now_delivery_charge'].toString()) ?? 10.0);
+        }
+        final double expectedRaw = quickSubtotal + quickDeliveryFee;
+        final double expectedRounded = (expectedRaw / 5).ceil() * 5.0;
+        if (totalAmount <= 0 || (totalAmount - quickSubtotal).abs() > (quickDeliveryFee + 15.0)) {
+          totalAmount = expectedRounded;
+        }
+      }
+    }
+
     final deliveryDateStr = order['delivery_date']?.toString();
+
 
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
@@ -228,24 +289,27 @@ class _MyOrdersScreenState extends ConsumerState<MyOrdersScreen> {
           borderRadius: BorderRadius.circular(16),
           onTap: () {
             HapticFeedback.lightImpact();
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (context) => OrderDetailsScreen(orderId: order['id']),
-              ),
-            );
+            final String orderId = order['id']?.toString() ?? order['order_number']?.toString() ?? '';
+            if (orderId.isNotEmpty) {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => OrderDetailsScreen(orderId: orderId),
+                ),
+              );
+            }
           },
           child: Padding(
             padding: const EdgeInsets.all(16.0),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Top Header: Order Number & Status Pill
+                // Top Header Row: Order Number & Subtle Status Badge
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      '#$orderNo${isOffline ? ' (Offline)' : ''}',
+                      '$orderNo${isOffline ? " (Offline)" : ""}',
                       style: GoogleFonts.outfit(
                         fontWeight: FontWeight.bold,
                         fontSize: 15,
@@ -344,7 +408,7 @@ class _MyOrdersScreenState extends ConsumerState<MyOrdersScreen> {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      '₹${totalAmount.toStringAsFixed(2)}',
+                      '₹${_formatCurrency(totalAmount)}',
                       style: GoogleFonts.outfit(
                         fontSize: 18,
                         fontWeight: FontWeight.bold,

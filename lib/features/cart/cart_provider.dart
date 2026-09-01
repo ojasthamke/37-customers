@@ -12,6 +12,7 @@ class CartItem {
   final double quantity;
   final String unit;
   final bool isOrderNow;
+  final String? imagePath;
 
   CartItem({
     required this.productId,
@@ -20,16 +21,25 @@ class CartItem {
     required this.quantity,
     required this.unit,
     this.isOrderNow = false,
+    this.imagePath,
   });
 
-  CartItem copyWith({double? quantity}) {
+  CartItem copyWith({
+    String? productName,
+    double? price,
+    double? quantity,
+    String? unit,
+    bool? isOrderNow,
+    String? imagePath,
+  }) {
     return CartItem(
       productId: productId,
-      productName: productName,
-      price: price,
+      productName: productName ?? this.productName,
+      price: price ?? this.price,
       quantity: quantity ?? this.quantity,
-      unit: unit,
-      isOrderNow: isOrderNow,
+      unit: unit ?? this.unit,
+      isOrderNow: isOrderNow ?? this.isOrderNow,
+      imagePath: imagePath ?? this.imagePath,
     );
   }
 
@@ -70,25 +80,24 @@ class CartState {
 
   double get unroundedGrandTotal => subtotal + baseDeliveryCharge;
 
-  /// Auto-rounded grand total (Orderkart POS ceil to multiple of 5)
+  /// Rounded to nearest multiple of 5 (ceil) for clean retail POS receipts
   double get roundedGrandTotal {
-    if (subtotal == 0) return 0.0;
+    if (unroundedGrandTotal == 0) return 0.0;
     return (unroundedGrandTotal / 5.0).ceil() * 5.0;
   }
 
-  /// The rounding adjustment added to delivery charge
+  /// Rounding difference added to delivery fee
   double get roundingDifference => roundedGrandTotal - unroundedGrandTotal;
 
-  /// Final delivery charge including rounding adjustment
+  /// Final delivery charge including the auto round-off adjustment
   double get deliveryCharge {
-    if (subtotal == 0) return 0.0;
+    if (baseDeliveryCharge == 0 && roundingDifference == 0) return 0.0;
     return baseDeliveryCharge + roundingDifference;
   }
 
   double get grandTotal => roundedGrandTotal;
 
-  /// Adjusted item prices is now deprecated since the rounding is added directly to delivery charge.
-  /// We return the original item totals to keep compatibility with any UI elements.
+  /// Item prices mapped to their exact totals
   Map<String, double> get adjustedItemPrices {
     final result = <String, double>{};
     for (final entry in items.entries) {
@@ -101,7 +110,12 @@ class CartState {
 class CartNotifier extends StateNotifier<CartState> {
   final String _storageKey;
 
-  CartNotifier({String storageKey = 'cart_items'}) : _storageKey = storageKey, super(CartState()) {
+  CartNotifier({String storageKey = 'cart_items'})
+      : _storageKey = storageKey,
+        super(CartState(
+          deliveryChargeValue: storageKey == 'quick_cart_items' ? 10.0 : 30.0,
+          freeDeliveryLimit: storageKey == 'quick_cart_items' ? 100000.0 : 300.0,
+        )) {
     _initCart();
   }
 
@@ -115,7 +129,11 @@ class CartNotifier extends StateNotifier<CartState> {
       final List<dynamic> res = await Supabase.instance.client.from('settings').select();
       final Map<String, String> fetched = {};
       for (var r in res) {
-        fetched[r['key'] as String] = r['value'] as String;
+        final key = r['key']?.toString() ?? '';
+        final val = r['value']?.toString() ?? '';
+        if (key.isNotEmpty) {
+          fetched[key] = val;
+        }
       }
       
       // Update local SQLite cache
@@ -128,8 +146,18 @@ class CartNotifier extends StateNotifier<CartState> {
         );
       }
       
-      final double charge = double.tryParse(fetched['delivery_charge'] ?? '30.0') ?? 30.0;
-      final double limit = double.tryParse(fetched['free_delivery_threshold'] ?? '300.0') ?? 300.0;
+      final double defaultCharge = _storageKey == 'quick_cart_items' ? 10.0 : 30.0;
+      final double charge = double.tryParse(
+        _storageKey == 'quick_cart_items'
+          ? (fetched['order_now_delivery_charge'] ?? fetched['quick_delivery_charge'] ?? '10.0')
+          : (fetched['delivery_charge'] ?? '30.0')
+      ) ?? defaultCharge;
+      final double defaultLimit = _storageKey == 'quick_cart_items' ? 100000.0 : 300.0;
+      final double limit = double.tryParse(
+        _storageKey == 'quick_cart_items'
+          ? (fetched['order_now_free_delivery_threshold'] ?? fetched['quick_free_delivery_threshold'] ?? '100000.0')
+          : (fetched['free_delivery_threshold'] ?? '300.0')
+      ) ?? defaultLimit;
       
       state = state.copyWith(
         deliveryChargeValue: charge,
@@ -139,11 +167,15 @@ class CartNotifier extends StateNotifier<CartState> {
       // Fallback: Read from local SQLite
       try {
         final db = await DatabaseHelper.instance.database;
-        final chargeRes = await db.query('settings', where: 'key = ?', whereArgs: ['delivery_charge']);
-        final limitRes = await db.query('settings', where: 'key = ?', whereArgs: ['free_delivery_threshold']);
+        final chargeKey = _storageKey == 'quick_cart_items' ? 'order_now_delivery_charge' : 'delivery_charge';
+        final chargeRes = await db.query('settings', where: 'key = ?', whereArgs: [chargeKey]);
+        final limitKey = _storageKey == 'quick_cart_items' ? 'order_now_free_delivery_threshold' : 'free_delivery_threshold';
+        final limitRes = await db.query('settings', where: 'key = ?', whereArgs: [limitKey]);
         
-        final double charge = chargeRes.isNotEmpty ? (double.tryParse(chargeRes.first['value'] as String) ?? 30.0) : 30.0;
-        final double limit = limitRes.isNotEmpty ? (double.tryParse(limitRes.first['value'] as String) ?? 300.0) : 300.0;
+        final double defaultCharge = _storageKey == 'quick_cart_items' ? 10.0 : 30.0;
+        final double charge = chargeRes.isNotEmpty ? (double.tryParse(chargeRes.first['value']?.toString() ?? '') ?? defaultCharge) : defaultCharge;
+        final double defaultLimit = _storageKey == 'quick_cart_items' ? 100000.0 : 300.0;
+        final double limit = limitRes.isNotEmpty ? (double.tryParse(limitRes.first['value']?.toString() ?? '') ?? defaultLimit) : defaultLimit;
         
         state = state.copyWith(
           deliveryChargeValue: charge,
@@ -166,14 +198,22 @@ class CartNotifier extends StateNotifier<CartState> {
         final List<dynamic> decoded = jsonDecode(val);
         final Map<String, CartItem> items = {};
         for (var item in decoded) {
-          final String prodId = item['productId'];
+          final String prodId = item['productId']?.toString() ?? '';
+          if (prodId.isEmpty) continue;
+          final double price = (item['price'] is num)
+              ? (item['price'] as num).toDouble()
+              : (double.tryParse(item['price']?.toString() ?? '') ?? 0.0);
+          final double quantity = (item['quantity'] is num)
+              ? (item['quantity'] as num).toDouble()
+              : (double.tryParse(item['quantity']?.toString() ?? '') ?? 0.0);
           items[prodId] = CartItem(
             productId: prodId,
-            productName: item['productName'] ?? '',
-            price: (item['price'] as num?)?.toDouble() ?? 0.0,
-            quantity: (item['quantity'] as num?)?.toDouble() ?? 0.0,
-            unit: item['unit'] ?? '',
-            isOrderNow: item['isOrderNow'] as bool? ?? false,
+            productName: item['productName']?.toString() ?? '',
+            price: price,
+            quantity: (quantity * 1000).round() / 1000.0,
+            unit: item['unit']?.toString() ?? '',
+            isOrderNow: item['isOrderNow'] == true || item['isOrderNow']?.toString() == '1' || item['isOrderNow']?.toString().toLowerCase() == 'true',
+            imagePath: item['imagePath']?.toString() ?? item['image_path']?.toString(),
           );
         }
         state = state.copyWith(items: items);
@@ -193,6 +233,7 @@ class CartNotifier extends StateNotifier<CartState> {
         'quantity': item.quantity,
         'unit': item.unit,
         'isOrderNow': item.isOrderNow,
+        'imagePath': item.imagePath,
       }).toList();
       final String val = jsonEncode(list);
       await db.insert(
@@ -212,21 +253,32 @@ class CartNotifier extends StateNotifier<CartState> {
     required String unit,
     double quantity = 1.0,
     bool isOrderNow = false,
+    String? imagePath,
   }) {
+    final String cleanId = productId.trim();
+    final double cleanQty = (quantity * 1000).round() / 1000.0;
+    if (cleanId.isEmpty || cleanQty <= 0.0001) return;
+    final double cleanPrice = price < 0 ? 0.0 : price;
+
     final Map<String, CartItem> updatedItems = Map.from(state.items);
-    final existing = updatedItems[productId];
+    final existing = updatedItems[cleanId];
 
     if (existing != null) {
-      updatedItems[productId] =
-          existing.copyWith(quantity: existing.quantity + quantity);
+      final double totalQty = ((existing.quantity + cleanQty) * 1000).round() / 1000.0;
+      updatedItems[cleanId] = existing.copyWith(
+        quantity: totalQty,
+        price: cleanPrice > 0 ? cleanPrice : existing.price,
+        imagePath: imagePath ?? existing.imagePath,
+      );
     } else {
-      updatedItems[productId] = CartItem(
-        productId: productId,
-        productName: productName,
-        price: price,
-        quantity: quantity,
+      updatedItems[cleanId] = CartItem(
+        productId: cleanId,
+        productName: productName.trim().isEmpty ? 'Item' : productName.trim(),
+        price: cleanPrice,
+        quantity: cleanQty,
         unit: unit,
-        isOrderNow: _storageKey == 'quick_cart_items',
+        isOrderNow: _storageKey == 'quick_cart_items' || isOrderNow,
+        imagePath: imagePath,
       );
     }
 
@@ -236,16 +288,19 @@ class CartNotifier extends StateNotifier<CartState> {
   }
 
   void updateQuantity(String productId, double quantity) {
-    if (quantity <= 0) {
-      removeItem(productId);
+    final String cleanId = productId.trim();
+    if (cleanId.isEmpty) return;
+    final double cleanQty = (quantity * 1000).round() / 1000.0;
+    if (cleanQty <= 0.0001) {
+      removeItem(cleanId);
       return;
     }
     
-    final existing = state.items[productId];
+    final existing = state.items[cleanId];
     if (existing == null) return;
 
     final Map<String, CartItem> updatedItems = Map.from(state.items);
-    updatedItems[productId] = existing.copyWith(quantity: quantity);
+    updatedItems[cleanId] = existing.copyWith(quantity: cleanQty);
     
     final newState = state.copyWith(items: updatedItems);
     state = newState;
@@ -253,16 +308,20 @@ class CartNotifier extends StateNotifier<CartState> {
   }
 
   void updateItemPrice(String productId, double price) {
-    final existing = state.items[productId];
+    final String cleanId = productId.trim();
+    if (cleanId.isEmpty) return;
+    final existing = state.items[cleanId];
     if (existing == null) return;
+    final double cleanPrice = price < 0 ? 0.0 : price;
 
     final Map<String, CartItem> updatedItems = Map.from(state.items);
-    updatedItems[productId] = CartItem(
+    updatedItems[cleanId] = CartItem(
       productId: existing.productId,
       productName: existing.productName,
-      price: price,
+      price: cleanPrice,
       quantity: existing.quantity,
       unit: existing.unit,
+      isOrderNow: existing.isOrderNow,
     );
     
     final newState = state.copyWith(items: updatedItems);
@@ -271,8 +330,9 @@ class CartNotifier extends StateNotifier<CartState> {
   }
 
   void removeItem(String productId) {
+    final String cleanId = productId.trim();
     final Map<String, CartItem> updatedItems = Map.from(state.items);
-    updatedItems.remove(productId);
+    updatedItems.remove(cleanId);
     
     final newState = state.copyWith(items: updatedItems);
     state = newState;
@@ -343,29 +403,14 @@ final isViewingQuickOrderCartProvider = StateProvider<bool>((ref) => false);
 
 final activeCartProvider = Provider<CartState>((ref) {
   final isQuick = ref.watch(isViewingQuickOrderCartProvider);
-  final settingsAsync = ref.watch(appSettingsProvider);
-  final isClosed = settingsAsync.maybeWhen(
-    data: (settings) => isOrderNowClosed(settings),
-    orElse: () => false,
-  );
-  if (isClosed) {
-    return ref.watch(cartProvider);
-  }
   return isQuick ? ref.watch(quickCartProvider) : ref.watch(cartProvider);
 });
 
 final activeCartNotifierProvider = Provider<CartNotifier>((ref) {
   final isQuick = ref.watch(isViewingQuickOrderCartProvider);
-  final settingsAsync = ref.watch(appSettingsProvider);
-  final isClosed = settingsAsync.maybeWhen(
-    data: (settings) => isOrderNowClosed(settings),
-    orElse: () => false,
-  );
-  if (isClosed) {
-    return ref.watch(cartProvider.notifier);
-  }
   return isQuick ? ref.watch(quickCartProvider.notifier) : ref.watch(cartProvider.notifier);
 });
+
 
 final appSettingsProvider = StreamProvider<Map<String, String>>((ref) async* {
   Map<String, String> cached = {};

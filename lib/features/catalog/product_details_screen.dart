@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'catalog_provider.dart';
 import '../../core/widgets/quantity_selector.dart';
 import '../../core/utils/string_utils.dart';
+
 
 class ProductDetailsScreen extends ConsumerStatefulWidget {
   final String productId;
@@ -229,30 +231,40 @@ class _ProductDetailsScreenState extends ConsumerState<ProductDetailsScreen> {
                           ],
                         ),
                       ] else ...[
-                        SizedBox(
+                        Container(
                           width: double.infinity,
-                          height: 48,
-                          child: ElevatedButton(
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.grey[200],
-                              foregroundColor: Colors.grey[500],
-                              elevation: 0,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(24),
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFEF2F2),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(color: const Color(0xFFEF4444), width: 1.5),
+                            boxShadow: [
+                              BoxShadow(
+                                color: const Color(0xFFEF4444).withValues(alpha: 0.18),
+                                blurRadius: 12,
+                                offset: const Offset(0, 3),
                               ),
-                            ),
-                            onPressed: null,
-                            child: const Text(
-                              'OUT OF STOCK',
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 14,
-                                letterSpacing: 0.8,
+                            ],
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const Icon(Icons.warning_amber_rounded, color: Color(0xFFDC2626), size: 20),
+                              const SizedBox(width: 8),
+                              Text(
+                                'CURRENTLY OUT OF STOCK',
+                                style: GoogleFonts.outfit(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 13,
+                                  color: const Color(0xFFDC2626),
+                                  letterSpacing: 0.8,
+                                ),
                               ),
-                            ),
+                            ],
                           ),
                         ),
                       ]
+
                     ],
                   ),
                 ),

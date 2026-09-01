@@ -9,6 +9,7 @@ import '../../core/widgets/glass_container.dart';
 import '../../core/widgets/quantity_selector.dart';
 import '../../core/widgets/skeleton_loader.dart';
 import '../../core/widgets/animated_slashed_text.dart';
+import '../../core/utils/string_utils.dart';
 
 class OrderNowScreen extends ConsumerStatefulWidget {
   const OrderNowScreen({super.key});
@@ -87,24 +88,7 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
   }
 
   String _formatSelectorQuantity(double qty, String unit) {
-    final unitLower = unit.toLowerCase();
-    if (unitLower == 'kg') {
-      if (qty == 0.25) return '250 g';
-      if (qty == 0.5) return '500 g';
-      if (qty == 0.75) return '750 g';
-      final s = qty.toString();
-      if (s.endsWith('.0')) {
-        return '${qty.toInt()} kg';
-      }
-      return '$qty kg';
-    } else if (unitLower == 'g' || unitLower == 'gram' || unitLower == 'grams') {
-      return '${qty.toInt()} g';
-    } else {
-      if (qty == qty.toInt()) {
-        return '${qty.toInt()} $unit';
-      }
-      return '${qty.toStringAsFixed(1)} $unit';
-    }
+    return formatQuantity(qty, unit);
   }
 
   double _getStepSize(String unit) {
@@ -279,7 +263,8 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
         // Main Scrollable Content
         RefreshIndicator(
           onRefresh: () async {
-            ref.invalidate(orderNowProductListProvider);
+            ref.invalidate(orderNowProductsProvider);
+            ref.invalidate(appSettingsProvider);
           },
           child: SingleChildScrollView(
             controller: _scrollController,
@@ -344,20 +329,21 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
                       itemCount: products.length,
                       itemBuilder: (context, index) {
                         final p = products[index];
-                        final double stock = (p['stock'] as num?)?.toDouble() ?? 0.0;
-                        final isAvailable = (p['is_available'] == true ||
-                                p['is_available'] == 1 ||
-                                p['is_enabled'] == true) &&
-                            stock > 0;
+                        final double onStock = (p['order_now_stock'] as num?)?.toDouble() ?? (p['stock'] as num?)?.toDouble() ?? 0.0;
+                        final isAvailable = (p['order_now_is_available'] == null ||
+                                p['order_now_is_available'] == true ||
+                                p['order_now_is_available'] == 1) &&
+                            onStock > 0;
                         final name = p['name'] ?? '';
                         final price = (p['price'] as num?)?.toDouble() ?? 0.0;
                         final unit = p['unit'] ?? 'kg';
+                        final originalPrice = (p['original_standard_price'] as num?)?.toDouble() ?? 0.0;
+                        final double rawDiscount = (p['price_off_percent'] as num?)?.toDouble() ?? 0.0;
+                        final discountPercent = rawDiscount.round();
 
                         final tags = _getProductTags(name);
                         final dbImageUrl = (p['image_path'] as String?) ?? (p['image_url'] as String?);
-                        final imageUrl = (dbImageUrl != null && dbImageUrl.trim().isNotEmpty)
-                            ? dbImageUrl
-                            : _getProductImage(name);
+                        final imageUrl = getProductImage(name, dbImageUrl);
 
                         final existingCartItem = cartState.items[p['id']];
                         final isInCart = existingCartItem != null;
@@ -366,7 +352,9 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
                           margin: const EdgeInsets.only(bottom: 20),
                           borderRadius: 24,
                           padding: const EdgeInsets.all(18.0),
+                          isStockOut: !isAvailable,
                           child: Row(
+
                             crossAxisAlignment: CrossAxisAlignment.center,
                             children: [
                               // Left side: Details
@@ -399,6 +387,62 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
                                         ),
                                       ),
                                     ),
+                                    if (discountPercent > 0 && originalPrice > price) ...[
+                                       Container(
+                                         margin: const EdgeInsets.only(bottom: 8),
+                                         padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4.5),
+                                         decoration: BoxDecoration(
+                                           gradient: LinearGradient(
+                                             begin: Alignment.topLeft,
+                                             end: Alignment.bottomRight,
+                                             colors: [
+                                               const Color(0xFFFFFBEB).withValues(alpha: 0.95),
+                                               const Color(0xFFFEF3C7).withValues(alpha: 0.85),
+                                               const Color(0xFFFDE68A).withValues(alpha: 0.65),
+                                             ],
+                                           ),
+                                           borderRadius: BorderRadius.circular(10),
+                                           border: Border.all(
+                                             color: const Color(0xFFF59E0B).withValues(alpha: 0.55),
+                                             width: 1.2,
+                                           ),
+                                           boxShadow: [
+                                             BoxShadow(
+                                               color: const Color(0xFFF59E0B).withValues(alpha: 0.18),
+                                               blurRadius: 8,
+                                               offset: const Offset(0, 2),
+                                             ),
+                                           ],
+                                         ),
+                                         child: Row(
+                                           mainAxisSize: MainAxisSize.min,
+                                           children: [
+                                             Container(
+                                               padding: const EdgeInsets.all(2),
+                                               decoration: BoxDecoration(
+                                                 color: const Color(0xFFF59E0B).withValues(alpha: 0.25),
+                                                 shape: BoxShape.circle,
+                                               ),
+                                               child: const Icon(
+                                                 Icons.bolt_rounded,
+                                                 size: 13,
+                                                 color: Color(0xFFD97706),
+                                               ),
+                                             ),
+                                             const SizedBox(width: 5),
+                                             Text(
+                                               'SAVE ₹${(originalPrice - price).round()} MORE',
+                                               style: GoogleFonts.outfit(
+                                                 color: const Color(0xFF92400E),
+                                                 fontWeight: FontWeight.w900,
+                                                 fontSize: 11.5,
+                                                 letterSpacing: 0.5,
+                                               ),
+                                             ),
+                                           ],
+                                         ),
+                                       ),
+                                     ],
                                     const SizedBox(height: 10),
                                     // Price & MRP Layout
                                     if (unit.toLowerCase().contains('kg')) ...[
@@ -491,66 +535,148 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
                                 mainAxisSize: MainAxisSize.min,
                                 crossAxisAlignment: CrossAxisAlignment.end,
                                 children: [
-                                  // Product Image
-                                  ClipRRect(
-                                    borderRadius: BorderRadius.circular(16),
-                                    child: SizedBox(
-                                      height: 100,
-                                      width: 120,
-                                      child: Image.network(
-                                        imageUrl,
-                                        height: 100,
-                                        width: 120,
-                                        cacheWidth: 360,
-                                        cacheHeight: 300,
-                                        fit: BoxFit.cover,
-                                        errorBuilder: (context, error, stackTrace) {
-                                          return Image.network(
-                                            _getProductImage(name),
+                                  // Product Image with Glass Reflection Discount Flag
+                                  Stack(
+                                    children: [
+                                      ClipRRect(
+                                        borderRadius: BorderRadius.circular(16),
+                                        child: SizedBox(
+                                          height: 100,
+                                          width: 120,
+                                          child: Image.network(
+                                            imageUrl,
                                             height: 100,
                                             width: 120,
+                                            cacheWidth: 360,
+                                            cacheHeight: 300,
                                             fit: BoxFit.cover,
                                             errorBuilder: (context, error, stackTrace) {
-                                              return Container(
+                                              return Image.network(
+                                                _getProductImage(name),
                                                 height: 100,
                                                 width: 120,
-                                                color: const Color(0xFFE8F5E9),
-                                                child: const Icon(Icons.eco_rounded, color: Color(0xFF2E6F40), size: 36),
+                                                cacheWidth: 360,
+                                                cacheHeight: 300,
+                                                fit: BoxFit.cover,
+                                                errorBuilder: (context, error, stackTrace) {
+
+                                                  return Container(
+                                                    height: 100,
+                                                    width: 120,
+                                                    color: const Color(0xFFE8F5E9),
+                                                    child: const Icon(Icons.eco_rounded, color: Color(0xFF2E6F40), size: 36),
+                                                  );
+                                                },
                                               );
                                             },
-                                          );
-                                        },
+                                          ),
+                                        ),
                                       ),
-                                    ),
+                                      if (!isAvailable)
+                                         Positioned.fill(
+                                           child: Container(
+                                             decoration: BoxDecoration(
+                                               borderRadius: BorderRadius.circular(16),
+                                               color: Colors.black.withValues(alpha: 0.35),
+                                             ),
+                                             child: Center(
+                                               child: Container(
+                                                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                                 decoration: BoxDecoration(
+                                                   color: const Color(0xFFEF4444),
+                                                   borderRadius: BorderRadius.circular(8),
+                                                   boxShadow: [
+                                                     BoxShadow(
+                                                       color: const Color(0xFFEF4444).withValues(alpha: 0.5),
+                                                       blurRadius: 8,
+                                                       offset: const Offset(0, 2),
+                                                     ),
+                                                   ],
+                                                 ),
+                                                 child: Text(
+                                                   'OUT OF STOCK',
+                                                   style: GoogleFonts.outfit(
+                                                     color: Colors.white,
+                                                     fontWeight: FontWeight.w900,
+                                                     fontSize: 10,
+                                                     letterSpacing: 0.5,
+                                                   ),
+                                                 ),
+                                               ),
+                                             ),
+                                           ),
+                                         )
+                                       else if (discountPercent > 0)
+                                         Positioned(
+                                           top: 6,
+                                           left: 6,
+                                           child: Container(
+                                             padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3.5),
+                                             decoration: BoxDecoration(
+                                               gradient: const LinearGradient(
+                                                 begin: Alignment.topLeft,
+                                                 end: Alignment.bottomRight,
+                                                 colors: [
+                                                   Color(0xFFE11D48),
+                                                   Color(0xFFBE123C),
+                                                 ],
+                                               ),
+                                               borderRadius: BorderRadius.circular(8),
+                                               border: Border.all(
+                                                 color: Colors.white.withValues(alpha: 0.6),
+                                                 width: 1,
+                                               ),
+                                               boxShadow: [
+                                                 BoxShadow(
+                                                   color: const Color(0xFFE11D48).withValues(alpha: 0.45),
+                                                   blurRadius: 6,
+                                                   offset: const Offset(0, 2),
+                                                 ),
+                                               ],
+                                             ),
+                                             child: Text(
+                                               '$discountPercent% OFF',
+                                               style: GoogleFonts.outfit(
+                                                 color: Colors.white,
+                                                 fontWeight: FontWeight.w900,
+                                                 fontSize: 9.5,
+                                                 letterSpacing: 0.4,
+                                               ),
+                                             ),
+                                           ),
+                                      ),
+                                    ],
                                   ),
                                   const SizedBox(height: 12),
 
-                                  // Button
-                                  if (!isAvailable)
-                                    SizedBox(
-                                      height: 34,
-                                      child: ElevatedButton(
-                                        style: ElevatedButton.styleFrom(
-                                          backgroundColor: Colors.grey[200],
-                                          foregroundColor: Colors.grey[500],
-                                          elevation: 0,
-                                          shape: RoundedRectangleBorder(
-                                            borderRadius: BorderRadius.circular(17),
-                                          ),
-                                          padding: const EdgeInsets.symmetric(horizontal: 10),
-                                        ),
-                                        onPressed: null,
-                                        child: Text(
-                                          'OUT OF STOCK',
-                                          style: GoogleFonts.inter(
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 9,
-                                            letterSpacing: 0.5,
-                                          ),
-                                        ),
-                                      ),
-                                    )
-                                  else if (!isInCart)
+                                   // Button
+                                   if (!isAvailable)
+                                     Container(
+                                       height: 34,
+                                       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                       decoration: BoxDecoration(
+                                         color: const Color(0xFFFEF2F2),
+                                         borderRadius: BorderRadius.circular(17),
+                                         border: Border.all(color: const Color(0xFFEF4444), width: 1.2),
+                                       ),
+                                       child: Row(
+                                         mainAxisSize: MainAxisSize.min,
+                                         children: [
+                                           const Icon(Icons.block_rounded, color: Color(0xFFDC2626), size: 13),
+                                           const SizedBox(width: 4),
+                                           Text(
+                                             'OUT OF STOCK',
+                                             style: GoogleFonts.inter(
+                                               fontWeight: FontWeight.w800,
+                                               fontSize: 9,
+                                               color: const Color(0xFFDC2626),
+                                               letterSpacing: 0.5,
+                                             ),
+                                           ),
+                                         ],
+                                       ),
+                                     )
+                                   else if (!isInCart)
                                     SizedBox(
                                       height: 36,
                                       child: ElevatedButton(
@@ -572,12 +698,35 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
                                             product: Map<String, dynamic>.from(p)..['is_order_now'] = true,
                                           );
                                         },
-                                        child: Text(
-                                          'Add to Cart',
-                                          style: GoogleFonts.inter(
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 12,
-                                          ),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Text(
+                                              'Add to Cart',
+                                              style: GoogleFonts.inter(
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                            if (discountPercent > 0) ...[
+                                              const SizedBox(width: 6),
+                                              Container(
+                                                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                                                decoration: BoxDecoration(
+                                                  color: const Color(0xFFFFB300),
+                                                  borderRadius: BorderRadius.circular(6),
+                                                ),
+                                                child: Text(
+                                                  '$discountPercent% OFF',
+                                                  style: GoogleFonts.inter(
+                                                    color: const Color(0xFF1B3624),
+                                                    fontWeight: FontWeight.w900,
+                                                    fontSize: 9,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ],
                                         ),
                                       ),
                                     )
@@ -631,11 +780,19 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
                                             constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
                                             onPressed: () {
                                               HapticFeedback.lightImpact();
-                                              showQuantitySelectionBottomSheet(
-                                             context: context,
-                                             ref: ref,
-                                             product: Map<String, dynamic>.from(p)..['is_order_now'] = true,
-                                           );
+                                              final step = _getStepSize(unit);
+                                              final maxStock = (p['order_now_stock'] as num?)?.toDouble() ?? (p['stock'] as num?)?.toDouble() ?? 999.0;
+                                              final nextQty = ((existingCartItem.quantity + step) * 1000).round() / 1000.0;
+                                              if (nextQty <= maxStock) {
+                                                ref.read(quickCartProvider.notifier).updateQuantity(p['id'], nextQty);
+                                              } else {
+                                                ScaffoldMessenger.of(context).showSnackBar(
+                                                  SnackBar(
+                                                    content: Text('Maximum available stock is ${formatQuantity(maxStock, unit)}'),
+                                                    duration: const Duration(seconds: 1),
+                                                  ),
+                                                );
+                                              }
                                             },
                                           ),
                                         ],
@@ -674,15 +831,10 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
       onTap: () {
         HapticFeedback.lightImpact();
         ref.read(cartOriginTabProvider.notifier).state = 2; // NOW is the origin
-        final settingsAsync = ref.read(appSettingsProvider);
-        final isClosed = isOrderNowClosed(settingsAsync.valueOrNull);
-        if (isClosed) {
-          ref.read(isViewingQuickOrderCartProvider.notifier).state = false;
-        } else {
-          ref.read(isViewingQuickOrderCartProvider.notifier).state = true;
-        }
+        ref.read(isViewingQuickOrderCartProvider.notifier).state = true;
         ref.read(activeTabProvider.notifier).state = 1; // Switch to Cart tab
       },
+
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         decoration: BoxDecoration(

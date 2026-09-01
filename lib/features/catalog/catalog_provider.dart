@@ -47,6 +47,11 @@ Map<String, dynamic> _parseProductDescription(Map<String, dynamic> p) {
 
 Map<String, dynamic> _parseOrderNowProduct(Map<String, dynamic> p) {
   final mapped = _parseProductDescription(p);
+  
+  // Store the standard normal price (Home section price) before override
+  final normalPrice = (p['price'] as num?)?.toDouble() ?? 0.0;
+  mapped['original_standard_price'] = normalPrice;
+
   final onPrice = (p['order_now_price'] as num?)?.toDouble();
   if (onPrice != null && onPrice > 0) {
     mapped['price'] = onPrice;
@@ -57,15 +62,50 @@ Map<String, dynamic> _parseOrderNowProduct(Map<String, dynamic> p) {
     mapped['market_price'] = onMrp;
     mapped['mrp'] = onMrp;
   }
-  if (p['order_now_stock'] != null) {
-    mapped['stock'] = (p['order_now_stock'] as num).toDouble();
-  }
-  mapped['order_now_stock'] = (p['order_now_stock'] as num?)?.toDouble() ?? (mapped['stock'] as num?)?.toDouble() ?? 0.0;
+
+  // ORDER NOW STOCK IS STRICTLY INDEPENDENT OF NORMAL HOME STOCK
+  final double onStock = (p['order_now_stock'] as num?)?.toDouble() ?? 0.0;
+  mapped['order_now_stock'] = onStock;
+  mapped['stock'] = onStock;
+
+  final bool onAvailable = p['order_now_is_available'] == null
+      ? true
+      : (p['order_now_is_available'] == true || p['order_now_is_available'] == 1);
+  mapped['order_now_is_available'] = onAvailable;
+  mapped['is_available'] = onAvailable;
+  mapped['is_enabled'] = onAvailable;
+  mapped['is_order_now'] = true;
+
   mapped['order_now_price'] = (p['order_now_price'] as num?)?.toDouble() ?? (mapped['price'] as num?)?.toDouble() ?? 0.0;
   mapped['order_now_mrp'] = (p['order_now_mrp'] as num?)?.toDouble() ?? (mapped['market_price'] as num?)?.toDouble() ?? 0.0;
-  mapped['order_now_is_available'] = p['order_now_is_available'] == null ? true : (p['order_now_is_available'] == true || p['order_now_is_available'] == 1);
-  mapped['is_enabled'] = mapped['order_now_is_available'];
-  mapped['is_order_now'] = true;
+
+  // Determine the price off percent
+  double? manualPercent;
+  if (p['price_off_percent'] != null) {
+    manualPercent = (p['price_off_percent'] as num).toDouble();
+  }
+  if (manualPercent == null) {
+    final desc = p['description'] as String? ?? '';
+    if (desc.trim().startsWith('{') && desc.trim().endsWith('}')) {
+      try {
+        final Map<String, dynamic> decoded = json.decode(desc);
+        if (decoded['price_off_percent'] != null) {
+          manualPercent = (decoded['price_off_percent'] as num).toDouble();
+        }
+      } catch (_) {}
+    }
+  }
+
+  // Calculate dynamic percent discount if no manual override
+  if (manualPercent != null) {
+    mapped['price_off_percent'] = manualPercent;
+  } else if (normalPrice > 0 && mapped['price'] != null && mapped['price'] < normalPrice) {
+    final dynamicPercent = (((normalPrice - mapped['price']) / normalPrice) * 100).roundToDouble();
+    mapped['price_off_percent'] = dynamicPercent;
+  } else {
+    mapped['price_off_percent'] = 0.0;
+  }
+
   return mapped;
 }
 
@@ -239,18 +279,16 @@ final allProductsProvider = StreamProvider<List<Map<String, dynamic>>>((ref) {
     sub = client
         .from('products')
         .stream(primaryKey: ['id'])
-        .map((list) {
-          final parsed = list
-              .where((p) => p['is_enabled'] == true || p['is_enabled'] == 1)
-              .map((p) => _parseProductDescription(p))
-              .toList();
-          parsed.sort(_sortProducts);
-          return parsed;
-        })
         .listen(
           (data) {
+            ref.read(catalogRepositoryProvider).cacheProducts(data);
+            final parsed = data
+                .where((p) => p['is_enabled'] == true || p['is_enabled'] == 1)
+                .map((p) => _parseProductDescription(p))
+                .toList();
+            parsed.sort(_sortProducts);
             if (!controller.isClosed) {
-              controller.add(data);
+              controller.add(parsed);
             }
           },
           onError: (err) {
@@ -363,7 +401,7 @@ final popularProductsProvider = StreamProvider<List<Map<String, dynamic>>>((ref)
   Future<void> fetchLatest() async {
     try {
       final repo = ref.read(catalogRepositoryProvider);
-      final res = await repo.getProducts();
+      final res = await repo.getProducts(forceRefresh: true);
       final filtered = List<Map<String, dynamic>>.from(res)
           .where((p) => p['is_enabled'] == true || p['is_enabled'] == 1)
           .toList();
@@ -391,16 +429,14 @@ final popularProductsProvider = StreamProvider<List<Map<String, dynamic>>>((ref)
     sub = client
         .from('products')
         .stream(primaryKey: ['id'])
-        .map((list) {
-          final filtered = list.where((p) => p['is_enabled'] == true || p['is_enabled'] == 1).toList();
-          final parsed = filtered.map((p) => _parseProductDescription(p)).toList();
-          parsed.sort(_sortProducts);
-          return parsed;
-        })
         .listen(
           (data) {
+            ref.read(catalogRepositoryProvider).cacheProducts(data);
+            final filtered = data.where((p) => p['is_enabled'] == true || p['is_enabled'] == 1).toList();
+            final parsed = filtered.map((p) => _parseProductDescription(p)).toList();
+            parsed.sort(_sortProducts);
             if (!controller.isClosed) {
-              controller.add(data);
+              controller.add(parsed);
             }
           },
           onError: (err) {
@@ -429,12 +465,12 @@ final orderNowProductsProvider = StreamProvider<List<Map<String, dynamic>>>((ref
   Future<void> fetchLatest() async {
     try {
       final repo = ref.read(catalogRepositoryProvider);
-      final res = await repo.getProducts();
+      final res = await repo.getProducts(forceRefresh: true);
       final parsed = List<Map<String, dynamic>>.from(res)
-          .where((p) =>
-              (p['order_now_is_available'] == null || p['order_now_is_available'] == true || p['order_now_is_available'] == 1) &&
-              ((p['order_now_stock'] as num?)?.toDouble() ?? 0.0) > 0)
           .map((p) => _parseOrderNowProduct(p))
+          .where((p) =>
+              (p['order_now_is_available'] == true || p['order_now_is_available'] == 1) &&
+              (p['is_enabled'] == null || p['is_enabled'] == true || p['is_enabled'] == 1))
           .toList();
       parsed.sort(_sortProducts);
       if (!controller.isClosed) {
@@ -457,11 +493,12 @@ final orderNowProductsProvider = StreamProvider<List<Map<String, dynamic>>>((ref
         .from('products')
         .stream(primaryKey: ['id'])
         .listen((data) {
+          ref.read(catalogRepositoryProvider).cacheProducts(data);
           final parsed = List<Map<String, dynamic>>.from(data)
-              .where((p) =>
-                  (p['order_now_is_available'] == null || p['order_now_is_available'] == true || p['order_now_is_available'] == 1) &&
-                  ((p['order_now_stock'] as num?)?.toDouble() ?? 0.0) > 0)
               .map((p) => _parseOrderNowProduct(p))
+              .where((p) =>
+                  (p['order_now_is_available'] == true || p['order_now_is_available'] == 1) &&
+                  (p['is_enabled'] == null || p['is_enabled'] == true || p['is_enabled'] == 1))
               .toList();
           parsed.sort(_sortProducts);
           if (!controller.isClosed) {

@@ -35,10 +35,14 @@ class _QuantitySelectionSheetState extends ConsumerState<QuantitySelectionSheet>
   void initState() {
     super.initState();
     unit = (widget.product['unit'] ?? 'kg').toString().toLowerCase();
-    price = (widget.product['price'] as num?)?.toDouble() ?? 0.0;
-    productId = widget.product['id'] as String;
+    price = (widget.product['price'] is num)
+        ? (widget.product['price'] as num).toDouble()
+        : (double.tryParse(widget.product['price']?.toString() ?? '') ?? 0.0);
+    productId = widget.product['id']?.toString() ?? '';
 
-    final double stock = (widget.product['stock'] as num?)?.toDouble() ?? 0.0;
+    final double stock = widget.product['is_order_now'] == true
+        ? ((widget.product['order_now_stock'] as num?)?.toDouble() ?? (widget.product['stock'] as num?)?.toDouble() ?? 0.0)
+        : ((widget.product['stock'] as num?)?.toDouble() ?? (double.tryParse(widget.product['stock']?.toString() ?? '') ?? 0.0));
 
     if (unit == 'kg' || unit == 'g' || unit == 'gram' || unit == 'grams') {
       if (unit == 'kg') {
@@ -102,7 +106,9 @@ class _QuantitySelectionSheetState extends ConsumerState<QuantitySelectionSheet>
   }
 
   String? get _validationError {
-    final double stock = (widget.product['stock'] as num?)?.toDouble() ?? 0.0;
+    final double stock = widget.product['is_order_now'] == true
+        ? ((widget.product['order_now_stock'] as num?)?.toDouble() ?? (widget.product['stock'] as num?)?.toDouble() ?? 0.0)
+        : ((widget.product['stock'] as num?)?.toDouble() ?? 0.0);
     if (!isCustom) {
       if (selectedValue != null && selectedValue! > stock) {
         return 'Only $stock $unit available in stock';
@@ -154,12 +160,13 @@ class _QuantitySelectionSheetState extends ConsumerState<QuantitySelectionSheet>
     if (!initialized) {
       initialized = true;
       if (currentQty > 0.0) {
-        final matchesPreset = options.any((opt) => opt.value == currentQty);
-        if (matchesPreset) {
-          selectedValue = currentQty;
+        final roundedCurrentQty = (currentQty * 1000).round() / 1000.0;
+        final matchingOpt = options.where((opt) => (opt.value - roundedCurrentQty).abs() < 0.001).firstOrNull;
+        if (matchingOpt != null) {
+          selectedValue = matchingOpt.value;
         } else {
           isCustom = true;
-          customController.text = currentQty.toString();
+          customController.text = (currentQty == currentQty.toInt()) ? currentQty.toInt().toString() : roundedCurrentQty.toString();
         }
       } else {
         if (options.isNotEmpty) {
@@ -176,66 +183,95 @@ class _QuantitySelectionSheetState extends ConsumerState<QuantitySelectionSheet>
     const Color bgCard = Color(0xFFF3ECE6);
     const Color borderPillColor = Color(0xFFE2D6CA);
 
-    return Padding(
-      padding: EdgeInsets.only(
-        bottom: MediaQuery.of(context).viewInsets.bottom + 24,
-        left: 24,
-        right: 24,
-        top: 24,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Expanded(
-                child: Text(
-                  widget.product['name'] ?? '',
-                  style: GoogleFonts.outfit(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 20,
-                    color: textColorPrimary,
-                  ),
-                ),
-              ),
-              IconButton(
-                icon: const Icon(Icons.close_rounded, color: textColorPrimary),
-                onPressed: () => Navigator.pop(context),
-              ),
-            ],
-          ),
-          Text(
-            'Unit Price: ₹${price.toStringAsFixed(0)} per $unit',
-            style: GoogleFonts.inter(color: textColorSecondary, fontSize: 14),
-          ),
-          const SizedBox(height: 20),
-          Text(
-            'Select Quantity',
-            style: GoogleFonts.outfit(
-              fontWeight: FontWeight.bold,
-              fontSize: 16,
-              color: textColorPrimary,
-            ),
-          ),
-          const SizedBox(height: 12),
-          
-          Wrap(
-            spacing: 10,
-            runSpacing: 10,
-            children: [
-              ...options.map((opt) {
-                final isSelected = !isCustom && selectedValue == opt.value;
-                return ChoiceChip(
-                  label: Text(
-                    opt.label,
-                    style: GoogleFonts.inter(
-                      color: isSelected ? Colors.white : textColorPrimary,
-                      fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+    return SingleChildScrollView(
+      child: Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(context).viewInsets.bottom + 24,
+          left: 24,
+          right: 24,
+          top: 24,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Text(
+                    widget.product['name'] ?? '',
+                    style: GoogleFonts.outfit(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 20,
+                      color: textColorPrimary,
                     ),
                   ),
-                  selected: isSelected,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close_rounded, color: textColorPrimary),
+                  tooltip: 'Close',
+                  onPressed: () => Navigator.pop(context),
+                ),
+              ],
+            ),
+            Text(
+              'Unit Price: ₹${price.toStringAsFixed(0)} per $unit',
+              style: GoogleFonts.inter(color: textColorSecondary, fontSize: 14),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Select Quantity',
+              style: GoogleFonts.outfit(
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
+                color: textColorPrimary,
+              ),
+            ),
+            const SizedBox(height: 12),
+            
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                ...options.map((opt) {
+                  final isSelected = !isCustom && selectedValue == opt.value;
+                  return ChoiceChip(
+                    label: Text(
+                      opt.label,
+                      style: GoogleFonts.inter(
+                        color: isSelected ? Colors.white : textColorPrimary,
+                        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                      ),
+                    ),
+                    selected: isSelected,
+                    selectedColor: textColorPrimary,
+                    backgroundColor: bgCard,
+                    checkmarkColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                      side: const BorderSide(color: borderPillColor),
+                    ),
+                    onSelected: (selected) {
+                      if (selected) {
+                        HapticFeedback.selectionClick();
+                        setState(() {
+                          isCustom = false;
+                          selectedValue = opt.value;
+                        });
+                      }
+                    },
+                  );
+                }),
+                ChoiceChip(
+                  label: Text(
+                    'Custom',
+                    style: GoogleFonts.inter(
+                      color: isCustom ? Colors.white : textColorPrimary,
+                      fontWeight: isCustom ? FontWeight.bold : FontWeight.normal,
+                    ),
+                  ),
+                  selected: isCustom,
                   selectedColor: textColorPrimary,
                   backgroundColor: bgCard,
                   checkmarkColor: Colors.white,
@@ -247,147 +283,122 @@ class _QuantitySelectionSheetState extends ConsumerState<QuantitySelectionSheet>
                     if (selected) {
                       HapticFeedback.selectionClick();
                       setState(() {
-                        isCustom = false;
-                        selectedValue = opt.value;
+                        isCustom = true;
+                        selectedValue = null;
                       });
                     }
                   },
-                );
-              }),
-              ChoiceChip(
-                label: Text(
-                  'Custom',
-                  style: GoogleFonts.inter(
-                    color: isCustom ? Colors.white : textColorPrimary,
-                    fontWeight: isCustom ? FontWeight.bold : FontWeight.normal,
+                ),
+              ],
+            ),
+            
+            if (isCustom) ...[
+              const SizedBox(height: 16),
+              TextField(
+                controller: customController,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                style: GoogleFonts.inter(color: textColorPrimary),
+                decoration: InputDecoration(
+                  labelText: 'Enter custom quantity ($unit)',
+                  labelStyle: GoogleFonts.inter(color: textColorSecondary),
+                  errorText: _validationError,
+                  helperText: _helperText,
+                  helperStyle: GoogleFonts.inter(color: Colors.green[700]),
+                  filled: true,
+                  fillColor: Colors.white,
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: borderPillColor),
                   ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: textColorPrimary, width: 1.5),
+                  ),
+                  errorBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: Colors.red),
+                  ),
+                  focusedErrorBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: Colors.red, width: 1.5),
+                  ),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                 ),
-                selected: isCustom,
-                selectedColor: textColorPrimary,
-                backgroundColor: bgCard,
-                checkmarkColor: Colors.white,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16),
-                  side: const BorderSide(color: borderPillColor),
-                ),
-                onSelected: (selected) {
-                  if (selected) {
-                    HapticFeedback.selectionClick();
-                    setState(() {
-                      isCustom = true;
-                      selectedValue = null;
-                    });
-                  }
+                onChanged: (_) {
+                  setState(() {});
                 },
               ),
             ],
-          ),
-          
-          if (isCustom) ...[
-            const SizedBox(height: 16),
-            TextField(
-              controller: customController,
-              keyboardType: const TextInputType.numberWithOptions(decimal: true),
-              style: GoogleFonts.inter(color: textColorPrimary),
-              decoration: InputDecoration(
-                labelText: 'Enter custom quantity ($unit)',
-                labelStyle: GoogleFonts.inter(color: textColorSecondary),
-                errorText: _validationError,
-                helperText: _helperText,
-                helperStyle: GoogleFonts.inter(color: Colors.green[700]),
-                filled: true,
-                fillColor: Colors.white,
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: const BorderSide(color: borderPillColor),
+            
+            const SizedBox(height: 24),
+            
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'Total Price:',
+                  style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.w500, color: textColorPrimary),
                 ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: const BorderSide(color: textColorPrimary, width: 1.5),
+                Text(
+                  '₹${getCalculatedPrice().toStringAsFixed(0)}',
+                  style: GoogleFonts.outfit(
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                    color: textColorPrimary,
+                  ),
                 ),
-                errorBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: const BorderSide(color: Colors.red),
+              ],
+            ),
+            
+            const SizedBox(height: 20),
+            
+            SizedBox(
+              width: double.infinity,
+              height: 52,
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: textColorPrimary,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(26),
+                  ),
                 ),
-                focusedErrorBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: const BorderSide(color: Colors.red, width: 1.5),
+                onPressed: _isValidQty ? () {
+                  final qty = getCalculatedQty();
+                  
+                  HapticFeedback.lightImpact();
+                  
+                  final notifier = ref.read(isQuick ? quickCartProvider.notifier : cartProvider.notifier);
+                  if (existingItem != null) {
+                    notifier.updateQuantity(productId, qty);
+                  } else {
+                    notifier.addItem(
+                      productId: productId,
+                      productName: widget.product['name'] ?? '',
+                      price: price,
+                      unit: widget.product['unit'] ?? '',
+                      quantity: qty,
+                      isOrderNow: isQuick,
+                      imagePath: widget.product['image_path'] as String? ?? widget.product['image_url'] as String?,
+                    );
+                  }
+                  
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('${widget.product['name']} cart quantity updated to ${formatQuantity(qty, unit)}!'),
+                      duration: const Duration(seconds: 1),
+                    ),
+                  );
+                } : null,
+                child: Text(
+                  'Confirm Selection',
+                  style: GoogleFonts.inter(fontWeight: FontWeight.bold, fontSize: 15),
                 ),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               ),
-              onChanged: (_) {
-                setState(() {});
-              },
             ),
           ],
-          
-          const SizedBox(height: 24),
-          
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                'Total Price:',
-                style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.w500, color: textColorPrimary),
-              ),
-              Text(
-                '₹${getCalculatedPrice().toStringAsFixed(0)}',
-                style: GoogleFonts.outfit(
-                  fontSize: 22,
-                  fontWeight: FontWeight.bold,
-                  color: textColorPrimary,
-                ),
-              ),
-            ],
-          ),
-          
-          const SizedBox(height: 20),
-          
-          SizedBox(
-            width: double.infinity,
-            height: 52,
-            child: ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: textColorPrimary,
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(26),
-                ),
-              ),
-              onPressed: _isValidQty ? () {
-                final qty = getCalculatedQty();
-                
-                HapticFeedback.lightImpact();
-                
-                final notifier = ref.read(isQuick ? quickCartProvider.notifier : cartProvider.notifier);
-                if (existingItem != null) {
-                  notifier.updateQuantity(productId, qty);
-                } else {
-                  notifier.addItem(
-                    productId: productId,
-                    productName: widget.product['name'] ?? '',
-                    price: price,
-                    unit: widget.product['unit'] ?? '',
-                    quantity: qty,
-                    isOrderNow: isQuick,
-                  );
-                }
-                
-                Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text('${widget.product['name']} cart quantity updated to ${formatQuantity(qty, unit)}!'),
-                    duration: const Duration(seconds: 1),
-                  ),
-                );
-              } : null,
-              child: Text(
-                'Confirm Selection',
-                style: GoogleFonts.inter(fontWeight: FontWeight.bold, fontSize: 15),
-              ),
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -411,22 +422,28 @@ void showQuantitySelectionBottomSheet({
 
 String formatQuantity(double qty, String unit) {
   final unitLower = unit.toLowerCase();
+  final roundedQty = (qty * 1000).round() / 1000.0;
   if (unitLower == 'kg') {
-    if (qty == 0.25) return '250 g';
-    if (qty == 0.5) return '500 g';
-    if (qty == 0.75) return '750 g';
-    final s = qty.toString();
-    if (s.endsWith('.0')) {
-      return '${qty.toInt()} kg';
+    if ((roundedQty - 0.25).abs() < 0.001) return '250 g';
+    if ((roundedQty - 0.50).abs() < 0.001) return '500 g';
+    if ((roundedQty - 0.75).abs() < 0.001) return '750 g';
+    if (roundedQty == roundedQty.toInt()) {
+      return '${roundedQty.toInt()} kg';
     }
-    return '$qty kg';
+    return '${roundedQty.toStringAsFixed(roundedQty * 10 == (roundedQty * 10).toInt() ? 1 : 2)} kg';
   } else if (unitLower == 'g' || unitLower == 'gram' || unitLower == 'grams') {
-    return '${qty.toInt()} g';
+    return '${roundedQty.toInt()} g';
+  } else if (unitLower == 'dozen' || unitLower == 'doz') {
+    if ((roundedQty - 0.5).abs() < 0.001) return '6 Pcs';
+    if ((roundedQty - 1.0).abs() < 0.001) return '1 Dozen';
+    if ((roundedQty - 1.5).abs() < 0.001) return '18 Pcs';
+    if (roundedQty == roundedQty.toInt()) return '${roundedQty.toInt()} Dozen';
+    return '$roundedQty Dozen';
   } else {
-    if (qty == qty.toInt()) {
-      return '${qty.toInt()} $unit';
+    if (roundedQty == roundedQty.toInt()) {
+      return '${roundedQty.toInt()} $unit';
     }
-    return '${qty.toStringAsFixed(1)} $unit';
+    return '${roundedQty.toStringAsFixed(1)} $unit';
   }
 }
 
@@ -437,7 +454,7 @@ class QuantitySelector extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final productId = product['id'] as String;
+    final productId = product['id']?.toString() ?? '';
     final isQuick = product['is_order_now'] == true;
     
     // Select only this product's quantity to isolate rebuild boundaries

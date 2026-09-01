@@ -334,10 +334,133 @@ $$;
 
 
 -- =====================================================================
--- 6. GRANT EXECUTE PERMISSIONS ON ALL RPCs
+-- 6. RPC: REGISTER GUEST CUSTOMER (SEPARATE ROW IN CUSTOMERS TABLE)
+-- =====================================================================
+DROP FUNCTION IF EXISTS public.register_guest_customer(TEXT, TEXT, TEXT, UUID, UUID, UUID) CASCADE;
+DROP FUNCTION IF EXISTS public.register_guest_customer(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) CASCADE;
+DROP FUNCTION IF EXISTS public.register_guest_customer(TEXT, TEXT, TEXT) CASCADE;
+DROP FUNCTION IF EXISTS public.register_guest_customer CASCADE;
+
+CREATE OR REPLACE FUNCTION public.register_guest_customer(
+  p_name TEXT,
+  p_phone TEXT,
+  p_address TEXT,
+  p_area_id TEXT DEFAULT NULL,
+  p_road_id TEXT DEFAULT NULL,
+  p_sub_road_id TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, auth, extensions, pg_temp
+AS $$
+DECLARE
+  v_customer_id UUID;
+  v_digits TEXT;
+  v_last10 TEXT;
+  v_clean_phone TEXT;
+  v_email TEXT;
+  v_customer_row RECORD;
+  v_area_uuid UUID;
+  v_road_uuid UUID;
+  v_sub_road_uuid UUID;
+BEGIN
+  -- Clean inputs
+  p_name := TRIM(p_name);
+  p_phone := TRIM(p_phone);
+  p_address := TRIM(p_address);
+  v_digits := regexp_replace(p_phone, '\D', '', 'g');
+  
+  IF LENGTH(v_digits) >= 10 THEN
+    v_last10 := RIGHT(v_digits, 10);
+    v_clean_phone := v_last10;
+  ELSE
+    v_last10 := '';
+    v_clean_phone := v_digits;
+  END IF;
+
+  v_email := v_clean_phone || '@aplibhaji.com';
+
+  -- Parse UUIDs safely
+  IF p_area_id IS NOT NULL AND p_area_id <> '' THEN
+    BEGIN v_area_uuid := p_area_id::uuid; EXCEPTION WHEN OTHERS THEN v_area_uuid := NULL; END;
+  END IF;
+  IF p_road_id IS NOT NULL AND p_road_id <> '' THEN
+    BEGIN v_road_uuid := p_road_id::uuid; EXCEPTION WHEN OTHERS THEN v_road_uuid := NULL; END;
+  END IF;
+  IF p_sub_road_id IS NOT NULL AND p_sub_road_id <> '' THEN
+    BEGIN v_sub_road_uuid := p_sub_road_id::uuid; EXCEPTION WHEN OTHERS THEN v_sub_road_uuid := NULL; END;
+  END IF;
+
+  -- Check if guest or customer exists by phone
+  SELECT id INTO v_customer_id
+  FROM public.customers
+  WHERE phone = p_phone
+     OR phone = v_clean_phone
+     OR (v_last10 <> '' AND RIGHT(regexp_replace(phone, '\D', '', 'g'), 10) = v_last10)
+  LIMIT 1;
+
+  IF v_customer_id IS NOT NULL THEN
+    -- Update existing customer record to ensure is_guest = TRUE
+    UPDATE public.customers
+    SET name = COALESCE(NULLIF(p_name, ''), name),
+        address = COALESCE(NULLIF(p_address, ''), address),
+        phone = p_phone,
+        is_guest = TRUE,
+        area_id = COALESCE(v_area_uuid, area_id),
+        road_id = COALESCE(v_road_uuid, road_id),
+        sub_road_id = COALESCE(v_sub_road_uuid, sub_road_id)
+    WHERE id = v_customer_id;
+  ELSE
+    -- Create new guest record with is_guest = TRUE
+    v_customer_id := gen_random_uuid();
+    INSERT INTO public.customers (
+      id, name, phone, email, address, is_guest,
+      area_id, road_id, sub_road_id
+    ) VALUES (
+      v_customer_id, p_name, p_phone, v_email, p_address, TRUE,
+      v_area_uuid, v_road_uuid, v_sub_road_uuid
+    );
+  END IF;
+
+  -- Select customer record
+  SELECT c.*, 
+         a.name AS area_name, a.delivery_schedule, a.cutoff_time,
+         r.name AS road_name,
+         sr.name AS sub_road_name
+  INTO v_customer_row
+  FROM public.customers c
+  LEFT JOIN public.areas a ON c.area_id = a.id
+  LEFT JOIN public.roads r ON c.road_id = r.id
+  LEFT JOIN public.sub_roads sr ON c.sub_road_id = sr.id
+  WHERE c.id = v_customer_id;
+
+  RETURN jsonb_build_object(
+    'id', v_customer_row.id,
+    'name', v_customer_row.name,
+    'phone', v_customer_row.phone,
+    'address', v_customer_row.address,
+    'is_guest', TRUE,
+    'customer_code', v_customer_row.customer_code,
+    'area_id', v_customer_row.area_id,
+    'area_name', v_customer_row.area_name,
+    'road_id', v_customer_row.road_id,
+    'road_name', v_customer_row.road_name,
+    'sub_road_id', v_customer_row.sub_road_id,
+    'sub_road_name', v_customer_row.sub_road_name,
+    'delivery_schedule', v_customer_row.delivery_schedule,
+    'cutoff_time', v_customer_row.cutoff_time
+  );
+END;
+$$;
+
+-- =====================================================================
+-- 7. GRANT EXECUTE PERMISSIONS ON ALL RPCs
 -- =====================================================================
 GRANT EXECUTE ON FUNCTION public.setup_customer_password(TEXT, TEXT, TEXT) TO authenticated, anon;
 GRANT EXECUTE ON FUNCTION public.check_customer_auth_status(TEXT) TO authenticated, anon;
 GRANT EXECUTE ON FUNCTION public.reset_customer_password(TEXT, TEXT, TEXT) TO authenticated, anon;
 GRANT EXECUTE ON FUNCTION public.update_customer_profile(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.register_guest_customer(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) TO authenticated, anon;
+
 

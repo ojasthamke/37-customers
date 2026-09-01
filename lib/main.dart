@@ -12,11 +12,17 @@ import 'features/splash/splash_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // Optimize Image Cache for Low-RAM / 2GB RAM Devices (Vivo Y3s, etc.)
+  // Caps decoded bitmap memory to 25MB max and 40 items max (preventing LMK OutOfMemory kills)
+  PaintingBinding.instance.imageCache.maximumSize = 40;
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 25 * 1024 * 1024;
+
   // Lock orientation to portrait vertical
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,
   ]);
+
 
   // Set system status bar icons to DARK for crisp visibility on light background screens
   SystemChrome.setSystemUIOverlayStyle(
@@ -27,23 +33,7 @@ void main() async {
     ),
   );
 
-  // Initialize Auth Rate Limiter
-  try {
-    await AuthRateLimiter.instance.init();
-    debugPrint('AuthRateLimiter initialized with session: ${AuthRateLimiter.instance.sessionId}');
-  } catch (e) {
-    debugPrint('AuthRateLimiter initialization failed: $e');
-  }
-
-  // Initialize Notification Service (asks for permission on Android 13+)
-  try {
-    await NotificationService.instance.init();
-    debugPrint('NotificationService initialized successfully.');
-  } catch (e) {
-    debugPrint('NotificationService initialization failed: $e');
-  }
-  
-  // Try initializing Supabase
+  // 1. Initialize Supabase FIRST so all downstream services have access
   try {
     const supabaseUrl = String.fromEnvironment(
       'SUPABASE_URL',
@@ -60,19 +50,27 @@ void main() async {
       authOptions: const FlutterAuthClientOptions(
         localStorage: SecureLocalStorage(persistSessionKey: 'aplibhaji_customer_session'),
       ),
-    );
+    ).timeout(const Duration(seconds: 4), onTimeout: () {
+      debugPrint('Supabase initialization timed out, continuing startup...');
+      return Supabase.instance;
+    });
     debugPrint('Supabase initialized successfully.');
   } catch (e) {
     debugPrint('Supabase initialization failed: $e');
   }
 
-  // Initialize Sync Service for offline order queue
+  // 2. Initialize secondary services non-blocking (so UI renders instantly)
+  try {
+    AuthRateLimiter.instance.init();
+  } catch (_) {}
+
+  try {
+    NotificationService.instance.init();
+  } catch (_) {}
+
   try {
     SyncService.instance.init();
-    debugPrint('SyncService initialized successfully.');
-  } catch (e) {
-    debugPrint('SyncService initialization failed: $e');
-  }
+  } catch (_) {}
 
   runApp(
     const ProviderScope(
@@ -88,7 +86,7 @@ class ApliBhajiApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       navigatorKey: NotificationService.navigatorKey,
-      title: 'ApliBhaji',
+      title: 'OrderKart',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
       darkTheme: AppTheme.darkTheme,

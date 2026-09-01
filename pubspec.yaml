@@ -1,7 +1,7 @@
 name: aplibhaji_customers
 description: "A mobile-first customer shopping app for ApliBhaji."
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.2+3
 
 environment:
   sdk: ^3.5.0
@@ -30,6 +30,7 @@ dependencies:
   url_launcher: ^6.3.1
   connectivity_plus: ^6.0.3
   flutter_secure_storage: ^9.2.2
+  shared_preferences: ^2.3.1
   
   # Notifications
   flutter_local_notifications: ^19.5.0

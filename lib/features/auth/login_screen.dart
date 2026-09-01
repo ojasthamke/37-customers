@@ -7,7 +7,10 @@ import 'package:url_launcher/url_launcher.dart';
 import 'auth_provider.dart';
 import 'password_rules_helper.dart';
 import '../dashboard/home_screen.dart';
+import '../profile/legal/policy_models.dart';
+import '../profile/legal/policy_detail_screen.dart';
 import '../../core/services/auth_rate_limiter.dart';
+import '../../core/widgets/shake_widget.dart';
 
 // ============================================================
 // MAIN LOGIN SCREEN WITH SELECTION PANEL (LOGIN & SETUP MODES)
@@ -23,16 +26,23 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   final _formKey = GlobalKey<FormState>();
   final _codeController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _termsShakeKeyLogin = GlobalKey<ShakeWidgetState>();
   bool _obscurePassword = true;
+  bool _acceptTermsLogin = false;
+  bool _termsErrorLogin = false;
 
   // Setup Password Mode
   final _setupFormKey = GlobalKey<FormState>();
   final _setupCodeController = TextEditingController();
   final _setupPasswordController = TextEditingController();
   final _setupConfirmPasswordController = TextEditingController();
+  final _termsShakeKeySetup = GlobalKey<ShakeWidgetState>();
   bool _setupObscurePassword = true;
   bool _setupObscureConfirmPassword = true;
   bool _isSettingUp = false;
+  bool _acceptTermsSetup = false;
+  bool _termsErrorSetup = false;
+
 
   String? _selectedOption; // null = selector, 'login' = login form, 'setup' = setup password form
   Timer? _countdownTimer;
@@ -70,6 +80,29 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       return;
     }
 
+    if (!_acceptTermsLogin) {
+      _termsShakeKeyLogin.currentState?.shake();
+      setState(() => _termsErrorLogin = true);
+      HapticFeedback.heavyImpact();
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: Colors.white),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text('Please accept the Terms & Conditions and Privacy Policy to continue.'),
+              ),
+            ],
+          ),
+          backgroundColor: Colors.red,
+          duration: Duration(seconds: 3),
+        ),
+      );
+      return;
+    }
+
     if (_formKey.currentState!.validate()) {
       final success = await ref.read(authProvider.notifier).loginWithCodeAndPassword(
             _codeController.text.trim(),
@@ -79,7 +112,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       if (!mounted) return;
 
       if (success) {
-        TextInput.finishAutofillContext();
+        TextInput.finishAutofillContext(shouldSave: true);
+        await Future.delayed(const Duration(milliseconds: 200));
+        if (!mounted) return;
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(builder: (context) => const HomeScreen()),
@@ -111,6 +146,30 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       return;
     }
 
+    if (!_acceptTermsSetup) {
+      _termsShakeKeySetup.currentState?.shake();
+      setState(() => _termsErrorSetup = true);
+      HapticFeedback.heavyImpact();
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: Colors.white),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text('Please accept the Terms & Conditions and Privacy Policy to create your password.'),
+              ),
+            ],
+          ),
+          backgroundColor: Colors.red,
+          duration: Duration(seconds: 3),
+        ),
+      );
+      return;
+    }
+
+
     if (_setupFormKey.currentState!.validate()) {
       setState(() => _isSettingUp = true);
       final code = _setupCodeController.text.trim().toUpperCase();
@@ -140,7 +199,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       // Step 2: Customer has no password yet -> proceed to setup password
       final success = await ref.read(authProvider.notifier).setupPassword(
             code,
-            code,
+            authStatus['name'] ?? '',
             _setupPasswordController.text,
           );
 
@@ -148,7 +207,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       setState(() => _isSettingUp = false);
 
       if (success) {
-        TextInput.finishAutofillContext();
+        TextInput.finishAutofillContext(shouldSave: true);
+        await Future.delayed(const Duration(milliseconds: 200));
+        if (!mounted) return;
         Navigator.pushAndRemoveUntil(
           context,
           MaterialPageRoute(builder: (context) => const HomeScreen()),
@@ -270,6 +331,123 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       },
     );
   }
+
+  Widget _buildTermsCheckbox({
+    required bool value,
+    required ValueChanged<bool?> onChanged,
+    GlobalKey<ShakeWidgetState>? shakeKey,
+    bool hasError = false,
+  }) {
+    final body = AnimatedContainer(
+      duration: const Duration(milliseconds: 250),
+      margin: const EdgeInsets.only(top: 12, bottom: 16),
+      padding: EdgeInsets.symmetric(horizontal: hasError ? 10 : 0, vertical: hasError ? 8 : 0),
+      decoration: BoxDecoration(
+        color: hasError ? const Color(0xFFFEF2F2) : Colors.transparent,
+        borderRadius: BorderRadius.circular(12),
+        border: hasError
+            ? Border.all(color: const Color(0xFFEF4444), width: 1.5)
+            : null,
+        boxShadow: hasError
+            ? [
+                BoxShadow(
+                  color: const Color(0xFFEF4444).withValues(alpha: 0.18),
+                  blurRadius: 10,
+                  offset: const Offset(0, 2),
+                )
+              ]
+            : null,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 24,
+            height: 24,
+            child: Checkbox(
+              value: value,
+              onChanged: onChanged,
+              activeColor: const Color(0xFF1B3624),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+              side: hasError
+                  ? const BorderSide(color: Color(0xFFEF4444), width: 1.8)
+                  : const BorderSide(color: Color(0xFF64748B), width: 1.5),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                Text(
+                  'I agree to OrderKart\'s ',
+                  style: GoogleFonts.inter(
+                    fontSize: 12,
+                    color: hasError ? const Color(0xFF991B1B) : const Color(0xFF475569),
+                    fontWeight: hasError ? FontWeight.w600 : FontWeight.normal,
+                  ),
+                ),
+                GestureDetector(
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const PolicyDetailScreen(policy: OrderKartPolicies.termsAndConditions),
+                    ),
+                  ),
+                  child: Text(
+                    'Terms & Conditions',
+                    style: GoogleFonts.inter(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: hasError ? const Color(0xFFB91C1C) : const Color(0xFF1B3624),
+                      decoration: TextDecoration.underline,
+                    ),
+                  ),
+                ),
+                Text(
+                  ' and ',
+                  style: GoogleFonts.inter(
+                    fontSize: 12,
+                    color: hasError ? const Color(0xFF991B1B) : const Color(0xFF475569),
+                    fontWeight: hasError ? FontWeight.w600 : FontWeight.normal,
+                  ),
+                ),
+                GestureDetector(
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const PolicyDetailScreen(policy: OrderKartPolicies.privacyPolicy),
+                    ),
+                  ),
+                  child: Text(
+                    'Privacy Policy',
+                    style: GoogleFonts.inter(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: hasError ? const Color(0xFFB91C1C) : const Color(0xFF1B3624),
+                      decoration: TextDecoration.underline,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (shakeKey != null) {
+      return ShakeWidget(
+        key: shakeKey,
+        shakeOffset: 12.0,
+        shakeCount: 4,
+        duration: const Duration(milliseconds: 500),
+        child: body,
+      );
+    }
+    return body;
+  }
+
 
   void _showContactStoreResetPassword() {
     showModalBottomSheet(
@@ -422,8 +600,11 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 'assets/orderkart_logo.png',
                 width: 280,
                 height: 160,
+                cacheWidth: 560,
+                cacheHeight: 320,
                 fit: BoxFit.contain,
               ),
+
               const SizedBox(height: 24),
 
               // CASE 1: OPTION SELECTION SCREEN
@@ -462,7 +643,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                       borderRadius: BorderRadius.circular(20),
                       boxShadow: [
                         BoxShadow(
-                          color: const Color(0xFF1B3624).withOpacity(0.15),
+                          color: const Color(0xFF1B3624).withValues(alpha: 0.15),
                           blurRadius: 10,
                           offset: const Offset(0, 5),
                         ),
@@ -519,7 +700,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                       border: Border.all(color: const Color(0xFFE2E8F0), width: 1.5),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withOpacity(0.04),
+                          color: Colors.black.withValues(alpha: 0.04),
                           blurRadius: 10,
                           offset: const Offset(0, 5),
                         ),
@@ -587,7 +768,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     borderRadius: BorderRadius.circular(24),
                     boxShadow: [
                       BoxShadow(
-                        color: Colors.black.withOpacity(0.06),
+                        color: Colors.black.withValues(alpha: 0.06),
                         blurRadius: 20,
                         offset: const Offset(0, 10),
                       ),
@@ -596,6 +777,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   child: Padding(
                     padding: const EdgeInsets.all(22.0),
                     child: AutofillGroup(
+                      onDisposeAction: AutofillContextAction.commit,
                       child: Form(
                         key: _formKey,
                         child: Column(
@@ -726,7 +908,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                           // Customer Code
                           TextFormField(
                             controller: _codeController,
-                            autofillHints: const [AutofillHints.username],
+                            autofillHints: const [AutofillHints.username, AutofillHints.telephoneNumber, AutofillHints.email],
+                            keyboardType: TextInputType.text,
+                            textInputAction: TextInputAction.next,
                             enabled: !AuthRateLimiter.instance.isLockedOut(),
                             textCapitalization: TextCapitalization.characters,
                             decoration: InputDecoration(
@@ -757,6 +941,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                           TextFormField(
                             controller: _passwordController,
                             autofillHints: const [AutofillHints.password],
+                            keyboardType: TextInputType.visiblePassword,
+                            textInputAction: TextInputAction.done,
                             enabled: !AuthRateLimiter.instance.isLockedOut(),
                             obscureText: _obscurePassword,
                             decoration: InputDecoration(
@@ -789,6 +975,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                             },
                             onFieldSubmitted: (_) => _submit(),
                           ),
+
                           Align(
                             alignment: Alignment.centerRight,
                             child: TextButton(
@@ -815,7 +1002,18 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                               ),
                             ),
                           ),
-                          const SizedBox(height: 8),
+                          _buildTermsCheckbox(
+                            value: _acceptTermsLogin,
+                            shakeKey: _termsShakeKeyLogin,
+                            hasError: _termsErrorLogin && !_acceptTermsLogin,
+                            onChanged: (val) {
+                              setState(() {
+                                _acceptTermsLogin = val ?? false;
+                                if (_acceptTermsLogin) _termsErrorLogin = false;
+                              });
+                            },
+                          ),
+
 
                           // Sign In Button
                           SizedBox(
@@ -867,7 +1065,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     borderRadius: BorderRadius.circular(24),
                     boxShadow: [
                       BoxShadow(
-                        color: Colors.black.withOpacity(0.06),
+                        color: Colors.black.withValues(alpha: 0.06),
                         blurRadius: 20,
                         offset: const Offset(0, 10),
                       ),
@@ -876,6 +1074,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   child: Padding(
                     padding: const EdgeInsets.all(22.0),
                     child: AutofillGroup(
+                      onDisposeAction: AutofillContextAction.commit,
                       child: Form(
                         key: _setupFormKey,
                         child: Column(
@@ -913,7 +1112,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                           // Customer Code
                           TextFormField(
                             controller: _setupCodeController,
-                            autofillHints: const [AutofillHints.username],
+                            autofillHints: const [AutofillHints.username, AutofillHints.telephoneNumber, AutofillHints.email],
+                            keyboardType: TextInputType.text,
+                            textInputAction: TextInputAction.next,
                             enabled: !_isSettingUp,
                             textCapitalization: TextCapitalization.characters,
                             decoration: InputDecoration(
@@ -944,6 +1145,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                           TextFormField(
                             controller: _setupPasswordController,
                             autofillHints: const [AutofillHints.newPassword],
+                            keyboardType: TextInputType.visiblePassword,
+                            textInputAction: TextInputAction.next,
                             enabled: !_isSettingUp,
                             obscureText: _setupObscurePassword,
                             onChanged: (val) => setState(() {}),
@@ -986,6 +1189,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                           TextFormField(
                             controller: _setupConfirmPasswordController,
                             autofillHints: const [AutofillHints.newPassword],
+                            keyboardType: TextInputType.visiblePassword,
+                            textInputAction: TextInputAction.done,
                             enabled: !_isSettingUp,
                             obscureText: _setupObscureConfirmPassword,
                             decoration: InputDecoration(
@@ -1018,7 +1223,19 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                             },
                             onFieldSubmitted: (_) => _submitSetup(),
                           ),
-                          const SizedBox(height: 24),
+
+                          _buildTermsCheckbox(
+                            value: _acceptTermsSetup,
+                            shakeKey: _termsShakeKeySetup,
+                            hasError: _termsErrorSetup && !_acceptTermsSetup,
+                            onChanged: (val) {
+                              setState(() {
+                                _acceptTermsSetup = val ?? false;
+                                if (_acceptTermsSetup) _termsErrorSetup = false;
+                              });
+                            },
+                          ),
+
 
                           // Setup Button
                           SizedBox(
@@ -1080,6 +1297,9 @@ class _GuestLoginScreenState extends ConsumerState<GuestLoginScreen> {
   final _nameController = TextEditingController();
   final _phoneController = TextEditingController();
   final _addressController = TextEditingController();
+  final _termsShakeKeyGuest = GlobalKey<ShakeWidgetState>();
+  bool _acceptTermsGuest = false;
+  bool _termsErrorGuest = false;
 
   @override
   void dispose() {
@@ -1090,6 +1310,30 @@ class _GuestLoginScreenState extends ConsumerState<GuestLoginScreen> {
   }
 
   void _submit() async {
+    if (!_acceptTermsGuest) {
+      _termsShakeKeyGuest.currentState?.shake();
+      setState(() => _termsErrorGuest = true);
+      HapticFeedback.heavyImpact();
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: Colors.white),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text('Please accept the Terms & Conditions and Privacy Policy to continue.'),
+              ),
+            ],
+          ),
+          backgroundColor: Colors.red,
+          duration: Duration(seconds: 3),
+        ),
+      );
+      return;
+    }
+
+
     if (_formKey.currentState!.validate()) {
       final success = await ref.read(authProvider.notifier).registerGuest(
             name: _nameController.text.trim(),
@@ -1355,7 +1599,126 @@ class _GuestLoginScreenState extends ConsumerState<GuestLoginScreen> {
                             return null;
                           },
                         ),
-                        const SizedBox(height: 24),
+                        ShakeWidget(
+                          key: _termsShakeKeyGuest,
+                          shakeOffset: 12.0,
+                          shakeCount: 4,
+                          duration: const Duration(milliseconds: 500),
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 250),
+                            margin: const EdgeInsets.only(top: 12, bottom: 16),
+                            padding: EdgeInsets.symmetric(
+                              horizontal: (_termsErrorGuest && !_acceptTermsGuest) ? 10 : 0,
+                              vertical: (_termsErrorGuest && !_acceptTermsGuest) ? 8 : 0,
+                            ),
+                            decoration: BoxDecoration(
+                              color: (_termsErrorGuest && !_acceptTermsGuest) ? const Color(0xFFFEF2F2) : Colors.transparent,
+                              borderRadius: BorderRadius.circular(12),
+                              border: (_termsErrorGuest && !_acceptTermsGuest)
+                                  ? Border.all(color: const Color(0xFFEF4444), width: 1.5)
+                                  : null,
+                              boxShadow: (_termsErrorGuest && !_acceptTermsGuest)
+                                  ? [
+                                      BoxShadow(
+                                        color: const Color(0xFFEF4444).withValues(alpha: 0.18),
+                                        blurRadius: 10,
+                                        offset: const Offset(0, 2),
+                                      )
+                                    ]
+                                  : null,
+                            ),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                SizedBox(
+                                  width: 24,
+                                  height: 24,
+                                  child: Checkbox(
+                                    value: _acceptTermsGuest,
+                                    onChanged: (val) {
+                                      setState(() {
+                                        _acceptTermsGuest = val ?? false;
+                                        if (_acceptTermsGuest) _termsErrorGuest = false;
+                                      });
+                                    },
+                                    activeColor: const Color(0xFF1B3624),
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                                    side: (_termsErrorGuest && !_acceptTermsGuest)
+                                        ? const BorderSide(color: Color(0xFFEF4444), width: 1.8)
+                                        : const BorderSide(color: Color(0xFF64748B), width: 1.5),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Wrap(
+                                    crossAxisAlignment: WrapCrossAlignment.center,
+                                    children: [
+                                      Text(
+                                        'I agree to OrderKart\'s ',
+                                        style: GoogleFonts.inter(
+                                          fontSize: 12,
+                                          color: (_termsErrorGuest && !_acceptTermsGuest)
+                                              ? const Color(0xFF991B1B)
+                                              : const Color(0xFF475569),
+                                          fontWeight: (_termsErrorGuest && !_acceptTermsGuest) ? FontWeight.w600 : FontWeight.normal,
+                                        ),
+                                      ),
+                                      GestureDetector(
+                                        onTap: () => Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                            builder: (context) => const PolicyDetailScreen(policy: OrderKartPolicies.termsAndConditions),
+                                          ),
+                                        ),
+                                        child: Text(
+                                          'Terms & Conditions',
+                                          style: GoogleFonts.inter(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.bold,
+                                            color: (_termsErrorGuest && !_acceptTermsGuest)
+                                                ? const Color(0xFFB91C1C)
+                                                : const Color(0xFF1B3624),
+                                            decoration: TextDecoration.underline,
+                                          ),
+                                        ),
+                                      ),
+                                      Text(
+                                        ' and ',
+                                        style: GoogleFonts.inter(
+                                          fontSize: 12,
+                                          color: (_termsErrorGuest && !_acceptTermsGuest)
+                                              ? const Color(0xFF991B1B)
+                                              : const Color(0xFF475569),
+                                          fontWeight: (_termsErrorGuest && !_acceptTermsGuest) ? FontWeight.w600 : FontWeight.normal,
+                                        ),
+                                      ),
+                                      GestureDetector(
+                                        onTap: () => Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                            builder: (context) => const PolicyDetailScreen(policy: OrderKartPolicies.privacyPolicy),
+                                          ),
+                                        ),
+                                        child: Text(
+                                          'Privacy Policy',
+                                          style: GoogleFonts.inter(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.bold,
+                                            color: (_termsErrorGuest && !_acceptTermsGuest)
+                                                ? const Color(0xFFB91C1C)
+                                                : const Color(0xFF1B3624),
+                                            decoration: TextDecoration.underline,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+
 
                         // Submit Button
                         SizedBox(

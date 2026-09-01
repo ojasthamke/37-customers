@@ -1,6 +1,8 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:sqflite/sqflite.dart' show ConflictAlgorithm;
 import 'database_helper.dart';
 
 // ==========================================
@@ -15,11 +17,13 @@ abstract class CatalogRepository {
     String? search,
     String? categoryId,
     Function(List<Map<String, dynamic>>)? onRefresh,
+    bool forceRefresh = false,
   });
   Future<Map<String, dynamic>?> getProductById(
     String id, {
     Function(Map<String, dynamic>)? onRefresh,
   });
+  Future<void> cacheProducts(List<Map<String, dynamic>> products);
 }
 
 abstract class CustomerRepository {
@@ -37,6 +41,7 @@ abstract class CustomerRepository {
   Future<bool> resetPassword(String phone, String newPassword);
   Future<Map<String, dynamic>> checkCustomerAuthStatus(String identifier);
   Future<Map<String, dynamic>> resetPasswordWithVerification(String identifier, String phoneConfirm, String newPassword);
+  Future<void> deleteAccount();
   Future<void> logout();
 }
 
@@ -89,6 +94,7 @@ class SQLiteCatalogRepository implements CatalogRepository {
     String? search,
     String? categoryId,
     Function(List<Map<String, dynamic>>)? onRefresh,
+    bool forceRefresh = false,
   }) async {
     final db = await _dbHelper.database;
     String whereClause = 'products.is_enabled = 1';
@@ -124,6 +130,37 @@ class SQLiteCatalogRepository implements CatalogRepository {
     final db = await _dbHelper.database;
     final res = await db.query('products', where: 'id = ? AND is_enabled = 1', whereArgs: [id]);
     return res.isNotEmpty ? _parseProductDescription(res.first) : null;
+  }
+
+  @override
+  Future<void> cacheProducts(List<Map<String, dynamic>> products) async {
+    final db = await _dbHelper.database;
+    final batch = db.batch();
+    for (final p in products) {
+      batch.insert(
+        'products',
+        {
+          'id': p['id'],
+          'name': p['name'],
+          'category_id': p['category_id'],
+          'image_path': p['image_path'],
+          'description': p['description'] is Map || p['description'] is List
+              ? json.encode(p['description'])
+              : p['description']?.toString() ?? '',
+          'price': (p['price'] as num?)?.toDouble() ?? 0.0,
+          'unit': p['unit']?.toString() ?? '',
+          'is_available': p['is_available'] == true || p['is_available'] == 1 ? 1 : 0,
+          'is_enabled': p['is_enabled'] == true || p['is_enabled'] == 1 ? 1 : 0,
+          'order_now_stock': (p['order_now_stock'] as num?)?.toDouble() ?? 0.0,
+          'order_now_price': (p['order_now_price'] as num?)?.toDouble() ?? 0.0,
+          'order_now_mrp': (p['order_now_mrp'] as num?)?.toDouble() ?? 0.0,
+          'order_now_cost_price': (p['order_now_cost_price'] as num?)?.toDouble() ?? 0.0,
+          'order_now_is_available': (p['order_now_is_available'] == null || p['order_now_is_available'] == true || p['order_now_is_available'] == 1) ? 1 : 0,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    }
+    await batch.commit(noResult: true);
   }
 
   Map<String, dynamic> _parseProductDescription(Map<String, dynamic> p) {
@@ -414,6 +451,11 @@ class SQLiteCustomerRepository implements CustomerRepository {
   }
 
   @override
+  Future<void> deleteAccount() async {
+    await logout();
+  }
+
+  @override
   Future<void> logout() async {
     final db = await _dbHelper.database;
     await db.update('customers', {'is_logged_in': 0});
@@ -574,6 +616,7 @@ class SupabaseCatalogRepository implements CatalogRepository {
     String? search,
     String? categoryId,
     Function(List<Map<String, dynamic>>)? onRefresh,
+    bool forceRefresh = false,
   }) async {
     var query = _client.from('products').select('*, categories(name)').eq('is_enabled', true);
     
@@ -601,6 +644,11 @@ class SupabaseCatalogRepository implements CatalogRepository {
   }) async {
     final res = await _client.from('products').select().eq('id', id).eq('is_enabled', true).maybeSingle();
     return res != null ? _parseProductDescription(res) : null;
+  }
+
+  @override
+  Future<void> cacheProducts(List<Map<String, dynamic>> products) async {
+    // No-op for remote repository
   }
 
   Map<String, dynamic> _parseProductDescription(Map<String, dynamic> p) {
@@ -819,31 +867,59 @@ class SupabaseCustomerRepository implements CustomerRepository {
   @override
   Future<Map<String, dynamic>?> registerGuest(String name, String phone, String address) async {
     try {
-      // Register as guest with a random password (guest can't login with password)
-      final guestPassword = 'guest_${DateTime.now().millisecondsSinceEpoch}';
-      final AuthResponse res = await _client.auth.signUp(
-        email: '$phone@aplibhaji.com',
-        password: guestPassword,
-        data: {
-          'name': name,
-          'phone': phone,
-          'address': address,
-          'is_guest': true,
-        },
-      );
-      if (res.user != null) {
-        await Future.delayed(const Duration(milliseconds: 500));
-        // Update the customer record to mark as guest
-        await _client.from('customers').update({'is_guest': true}).eq('id', res.user!.id);
-        final customer = await _client
-            .from('customers')
-            .select('*, areas(name, delivery_schedule, cutoff_time), roads(name), sub_roads(name)')
-            .eq('id', res.user!.id)
-            .single();
-        final Map<String, dynamic> mapped = Map.from(customer);
-        final area = customer['areas'] as Map<String, dynamic>?;
-        final road = customer['roads'] as Map<String, dynamic>?;
-        final subRoad = customer['sub_roads'] as Map<String, dynamic>?;
+      final cleanPhone = phone.replaceAll(RegExp(r'\D'), '');
+      final email = '$cleanPhone@aplibhaji.com';
+      final guestPassword = 'Guest_${cleanPhone}_2026';
+      
+      try {
+        await _client.auth.signUp(
+          email: email,
+          password: guestPassword,
+          data: {
+            'name': name,
+            'phone': phone,
+            'address': address,
+            'is_guest': true,
+          },
+        );
+      } catch (signUpErr) {
+        debugPrint('Guest signUp notice: $signUpErr. Attempting signIn...');
+        try {
+          await _client.auth.signInWithPassword(
+            email: email,
+            password: guestPassword,
+          );
+        } catch (_) {}
+      }
+
+      // 1. Call register_guest_customer RPC to guarantee separate guest row in customers table
+      try {
+        final rpcRes = await _client.rpc('register_guest_customer', params: {
+          'p_name': name,
+          'p_phone': phone,
+          'p_address': address,
+        });
+        if (rpcRes != null && rpcRes is Map) {
+          final mapped = Map<String, dynamic>.from(rpcRes);
+          mapped['is_guest'] = true;
+          return mapped;
+        }
+      } catch (rpcErr) {
+        debugPrint('register_guest_customer RPC notice: $rpcErr');
+      }
+
+      // 2. Query public.customers table for the guest record
+      final existing = await _client
+          .from('customers')
+          .select('*, areas(name, delivery_schedule, cutoff_time), roads(name), sub_roads(name)')
+          .or('phone.eq.$phone,phone.eq.$cleanPhone')
+          .maybeSingle();
+
+      if (existing != null) {
+        final Map<String, dynamic> mapped = Map.from(existing);
+        final area = existing['areas'] as Map<String, dynamic>?;
+        final road = existing['roads'] as Map<String, dynamic>?;
+        final subRoad = existing['sub_roads'] as Map<String, dynamic>?;
         mapped['area_name'] = area?['name'];
         mapped['delivery_schedule'] = area?['delivery_schedule'];
         mapped['cutoff_time'] = area?['cutoff_time'];
@@ -852,8 +928,8 @@ class SupabaseCustomerRepository implements CustomerRepository {
         mapped['is_guest'] = true;
         return mapped;
       }
-    } catch (_) {
-      rethrow;
+    } catch (e) {
+      debugPrint('Supabase registerGuest error: $e');
     }
     return null;
   }
@@ -1014,6 +1090,21 @@ class SupabaseCustomerRepository implements CustomerRepository {
   }
 
   @override
+  Future<void> deleteAccount() async {
+    try {
+      final user = _client.auth.currentUser;
+      if (user != null) {
+        try {
+          await _client.rpc('delete_customer_account');
+        } catch (_) {}
+      }
+    } catch (_) {
+    } finally {
+      await logout();
+    }
+  }
+
+  @override
   Future<void> logout() async {
     await _client.auth.signOut();
   }
@@ -1044,6 +1135,10 @@ class SupabaseOrderRepository implements OrderRepository {
         'p_items': items.map((item) => {
           'product_id': item['product_id'],
           'quantity': item['quantity'],
+          'price': (item['price'] as num?)?.toDouble() ?? 0.0,
+          'total_price': (item['total_price'] as num?)?.toDouble() ?? 0.0,
+          'product_name': item['product_name'],
+          'unit': item['unit'],
         }).toList(),
         'p_idempotency_key': idempotencyKey,
         'p_delivery_date': deliveryDate,
@@ -1051,11 +1146,58 @@ class SupabaseOrderRepository implements OrderRepository {
         'p_order_type': orderType ?? 'Normal',
         'p_order_taking_date': orderTakingDate,
       });
-      return Map<String, dynamic>.from(response);
+      final resMap = Map<String, dynamic>.from(response);
+
+      if (orderType == 'Quick Order' && resMap['id'] != null) {
+        final orderId = resMap['id'];
+        try {
+          // Explicitly sync order total_amount to the exact cart roundedGrandTotal
+          await _client.from('orders').update({
+            'total_amount': totalAmount,
+            'order_type': 'Quick Order',
+          }).eq('id', orderId);
+          resMap['total_amount'] = totalAmount;
+          resMap['order_type'] = 'Quick Order';
+
+          // Explicitly sync order_items with exact quick order prices and line totals
+          for (final item in items) {
+            final pid = item['product_id'];
+            final double qPrice = (item['price'] as num?)?.toDouble() ?? 0.0;
+            final double qTotal = (item['total_price'] as num?)?.toDouble() ?? 0.0;
+            final double qty = (item['quantity'] as num?)?.toDouble() ?? 0.0;
+
+            await _client.from('order_items').update({
+              'price': qPrice,
+              'total_price': qTotal,
+              'selling_price_snapshot': qPrice,
+              'line_total': qTotal,
+            }).eq('order_id', orderId).eq('product_id', pid);
+
+            // Synchronously deduct order_now_stock on products table in Supabase
+            try {
+              final prod = await _client.from('products').select('order_now_stock').eq('id', pid).maybeSingle();
+              if (prod != null && prod['order_now_stock'] != null) {
+                final curStock = (prod['order_now_stock'] as num).toDouble();
+                final newStock = (curStock - qty).clamp(0.0, double.infinity);
+                await _client.from('products').update({
+                  'order_now_stock': newStock,
+                  'order_now_is_available': newStock > 0,
+                }).eq('id', pid);
+              }
+            } catch (_) {}
+          }
+
+        } catch (syncErr) {
+          debugPrint('Quick order Supabase sync price error: $syncErr');
+        }
+      }
+
+      return resMap;
     } catch (e) {
       rethrow;
     }
   }
+
 
   @override
   Future<List<Map<String, dynamic>>> getOrders(

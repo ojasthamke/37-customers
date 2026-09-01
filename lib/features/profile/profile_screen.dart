@@ -5,6 +5,9 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../auth/auth_provider.dart';
 import '../auth/login_screen.dart';
+import 'legal/legal_policies_screen.dart';
+import 'legal/policy_models.dart';
+import 'legal/policy_detail_screen.dart';
 import '../../core/utils/string_utils.dart';
 import '../../core/widgets/ambient_background.dart';
 
@@ -71,7 +74,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   onPressed: () async {
                     Navigator.pop(context);
                     final customer = ref.read(authProvider).customer;
-                    final String rawName = sanitizeCustomerName(customer?['name']);
+                    final String rawName = sanitizeCustomerName(customer?['name'], customerCode: customer?['customer_code']);
                     final String msg = 'Hello Orderkart Support! I am $rawName, and I need assistance with my order.';
                     final String encodedMsg = Uri.encodeComponent(msg);
                     final whatsappUri = Uri.parse('whatsapp://send?phone=919021107009&text=$encodedMsg');
@@ -139,105 +142,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     );
   }
 
-  void _showTermsDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: bgCard,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: Text(
-          'Terms & Conditions',
-          style: GoogleFonts.playfairDisplay(
-            fontWeight: FontWeight.bold,
-            color: textColorPrimary,
-          ),
-        ),
-        content: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'Welcome to Orderkart! By accessing this shopping app, you agree to comply with and be bound by the following terms:',
-                style: GoogleFonts.inter(fontSize: 13, color: textColorSecondary),
-              ),
-              const SizedBox(height: 12),
-              Text(
-                '1. Account & Security\nCustomer accounts are manually assigned unique codes by the shop admin. Keep your login code secure. Any order placed under your account code is assumed to be authorized by you.',
-                style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.bold, color: textColorPrimary),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                '2. Product Quality & Weights\nVegetables and fruits are sold fresh. The weights may vary slightly due to natural weight loss during transit. Prices are updated daily based on wholesale market rates.',
-                style: GoogleFonts.inter(fontSize: 13, color: textColorSecondary),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                '3. Delivery & Payments\nOrders are delivered to your registered home address. Payment terms are configured individually for cash or digital settlement on delivery.',
-                style: GoogleFonts.inter(fontSize: 13, color: textColorSecondary),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Close', style: TextStyle(color: borderPillColor, fontWeight: FontWeight.bold)),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showPrivacyDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: bgCard,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: Text(
-          'Privacy Policy',
-          style: GoogleFonts.playfairDisplay(
-            fontWeight: FontWeight.bold,
-            color: textColorPrimary,
-          ),
-        ),
-        content: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'Orderkart is committed to safeguarding your privacy. Our data collection and storage rules are detailed below:',
-                style: GoogleFonts.inter(fontSize: 13, color: textColorSecondary),
-              ),
-              const SizedBox(height: 12),
-              Text(
-                '1. Personal Information Collected\nWe collect and store your name, phone number, delivery address, and order transaction history. This data is used solely to manage deliveries, payments, and balances.',
-                style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.bold, color: textColorPrimary),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                '2. Data Portability & Storage\nYour profile details and transaction logs are stored securely on the Supabase database. Local Order history data remains in the shop merchant app SQLite system for offline accounting.',
-                style: GoogleFonts.inter(fontSize: 13, color: textColorSecondary),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                '3. Third-party Sharing\nWe do not sell, rent, or trade customer information with third parties. Data is only accessible to authorized Orderkart admins and delivery personnel.',
-                style: GoogleFonts.inter(fontSize: 13, color: textColorSecondary),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Close', style: TextStyle(color: borderPillColor, fontWeight: FontWeight.bold)),
-          ),
-        ],
-      ),
-    );
-  }
 
 
   void _showChangePasswordDialog(BuildContext context, WidgetRef ref) {
@@ -393,23 +297,146 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     );
   }
 
+  void _showDeleteAccountDialog(BuildContext context, WidgetRef ref) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: bgCard,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.red.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Icon(Icons.warning_amber_rounded, color: Colors.red, size: 24),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'Delete Account?',
+                style: GoogleFonts.playfairDisplay(
+                  fontWeight: FontWeight.bold,
+                  color: textColorPrimary,
+                  fontSize: 20,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Are you sure you want to delete your online customer account?',
+              style: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: textColorPrimary,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFEF2F2),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFFFCA5A5)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.check_circle_outline, color: Color(0xFFDC2626), size: 16),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Your online app login & credentials will be permanently deleted from the database.',
+                          style: GoogleFonts.inter(fontSize: 12.5, color: const Color(0xFF991B1B)),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.info_outline, color: Color(0xFF047857), size: 16),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Your store account, transaction ledger, and previous orders will remain safely preserved in the shop\'s OrderKart system.',
+                          style: GoogleFonts.inter(fontSize: 12.5, color: const Color(0xFF065F46)),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'You can request a new login setup anytime from the shop admin.',
+              style: GoogleFonts.inter(fontSize: 12, color: textColorSecondary),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel', style: TextStyle(color: textColorSecondary, fontWeight: FontWeight.bold)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              elevation: 0,
+            ),
+            onPressed: () async {
+              Navigator.pop(context);
+              showDialog(
+                context: context,
+                barrierDismissible: false,
+                builder: (context) => const Center(child: CircularProgressIndicator()),
+              );
+
+              await ref.read(authProvider.notifier).deleteAccount();
+
+              if (!context.mounted) return;
+              Navigator.of(context, rootNavigator: true).pop();
+              Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute(builder: (context) => const LoginScreen()),
+                (route) => false,
+              );
+            },
+            child: const Text('Yes, Delete Account', style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final authState = ref.watch(authProvider);
+    final bool isGuest = authState.customer == null;
 
-    if (authState.customer == null) {
-      return const Scaffold(
-        body: Center(child: Text('Please log in to view your profile.')),
-      );
-    }
-
-    final String name = sanitizeCustomerName(authState.customer!['name']);
-    final String phone = authState.customer!['phone'] ?? 'N/A';
-    final String address = authState.customer!['address'] ?? 'N/A';
-    final String code = authState.customer!['customer_code'] ?? 'N/A';
-    final String areaName = authState.customer!['area_name'] ?? 'N/A';
-    final String roadName = authState.customer!['road_name'] ?? 'N/A';
-    final String subRoadName = authState.customer!['sub_road_name'] ?? '';
+    final String name = isGuest
+        ? 'Guest User'
+        : sanitizeCustomerName(authState.customer!['name'], customerCode: authState.customer!['customer_code']);
+    final String phone = isGuest ? 'Guest Access' : (authState.customer!['phone'] ?? 'N/A');
+    final String address = isGuest ? 'Set during checkout' : (authState.customer!['address'] ?? 'N/A');
+    final String code = isGuest ? 'GUEST' : (authState.customer!['customer_code'] ?? 'N/A');
+    final String areaName = isGuest ? 'Select Area' : (authState.customer!['area_name'] ?? 'N/A');
+    final String roadName = isGuest ? '' : (authState.customer!['road_name'] ?? 'N/A');
+    final String subRoadName = isGuest ? '' : (authState.customer!['sub_road_name'] ?? '');
     final String routeDetails = subRoadName.isNotEmpty ? '$roadName ($subRoadName)' : roadName;
 
     Widget content = SingleChildScrollView(
@@ -452,9 +479,11 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                     'assets/orderkart_logo.png',
                     height: 34,
                     width: 125,
+                    cacheHeight: 100,
                     fit: BoxFit.contain,
                     filterQuality: FilterQuality.high,
                   ),
+
                 ),
                 const SizedBox(height: 16),
                 const CircleAvatar(
@@ -513,12 +542,13 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
             ],
           ),
           const SizedBox(height: 12),
-          Container(
-            decoration: BoxDecoration(
-              color: bgCard,
+          Material(
+            color: bgCard,
+            shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: textColorSecondary.withValues(alpha: 0.1)),
+              side: BorderSide(color: textColorSecondary.withValues(alpha: 0.1)),
             ),
+            clipBehavior: Clip.antiAlias,
             child: Column(
               children: [
                 ListTile(
@@ -571,14 +601,26 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
             ),
           ),
           const SizedBox(height: 12),
-          Container(
-            decoration: BoxDecoration(
-              color: bgCard,
+          Material(
+            color: bgCard,
+            shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: textColorSecondary.withValues(alpha: 0.1)),
+              side: BorderSide(color: textColorSecondary.withValues(alpha: 0.1)),
             ),
+            clipBehavior: Clip.antiAlias,
             child: Column(
               children: [
+                ListTile(
+                  leading: const Icon(Icons.gavel_rounded, color: textColorPrimary),
+                  title: const Text('Legal & Policies', style: TextStyle(fontWeight: FontWeight.bold, color: textColorPrimary)),
+                  subtitle: const Text('Privacy, Terms, Refunds, Delivery & Deletion', style: TextStyle(fontSize: 11, color: textColorSecondary)),
+                  trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 14, color: textColorSecondary),
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (context) => const LegalPoliciesScreen()),
+                  ),
+                ),
+                const Divider(height: 1, indent: 56),
                 ListTile(
                   leading: const Icon(Icons.support_agent_outlined, color: textColorPrimary),
                   title: const Text('Contact Help & Support', style: TextStyle(fontWeight: FontWeight.bold, color: textColorPrimary)),
@@ -587,32 +629,77 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                 ),
                 const Divider(height: 1, indent: 56),
                 ListTile(
-                  leading: const Icon(Icons.description_outlined, color: textColorPrimary),
-                  title: const Text('Terms & Conditions', style: TextStyle(fontWeight: FontWeight.bold, color: textColorPrimary)),
-                  trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 14, color: textColorSecondary),
-                  onTap: () => _showTermsDialog(context),
-                ),
-                const Divider(height: 1, indent: 56),
-                ListTile(
                   leading: const Icon(Icons.privacy_tip_outlined, color: textColorPrimary),
                   title: const Text('Privacy Policy', style: TextStyle(fontWeight: FontWeight.bold, color: textColorPrimary)),
                   trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 14, color: textColorSecondary),
-                  onTap: () => _showPrivacyDialog(context),
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const PolicyDetailScreen(policy: OrderKartPolicies.privacyPolicy),
+                    ),
+                  ),
                 ),
                 const Divider(height: 1, indent: 56),
                 ListTile(
-                  leading: const Icon(Icons.lock_outline, color: textColorPrimary),
-                  title: const Text('Change Password', style: TextStyle(fontWeight: FontWeight.bold, color: textColorPrimary)),
+                  leading: const Icon(Icons.description_outlined, color: textColorPrimary),
+                  title: const Text('Terms & Conditions', style: TextStyle(fontWeight: FontWeight.bold, color: textColorPrimary)),
                   trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 14, color: textColorSecondary),
-                  onTap: () => _showChangePasswordDialog(context, ref),
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const PolicyDetailScreen(policy: OrderKartPolicies.termsAndConditions),
+                    ),
+                  ),
                 ),
-                const Divider(height: 1, indent: 56),
-                ListTile(
-                  leading: const Icon(Icons.logout, color: Colors.red),
-                  title: const Text('Sign Out', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
-                  trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 14, color: Colors.red),
-                  onTap: _logout,
-                ),
+                if (!isGuest) ...[
+                  const Divider(height: 1, indent: 56),
+                  ListTile(
+                    leading: const Icon(Icons.lock_outline, color: textColorPrimary),
+                    title: const Text('Change Password', style: TextStyle(fontWeight: FontWeight.bold, color: textColorPrimary)),
+                    trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 14, color: textColorSecondary),
+                    onTap: () => _showChangePasswordDialog(context, ref),
+                  ),
+                  const Divider(height: 1, indent: 56),
+                  ListTile(
+                    leading: const Icon(Icons.logout, color: textColorPrimary),
+                    title: const Text('Sign Out', style: TextStyle(fontWeight: FontWeight.bold, color: textColorPrimary)),
+                    trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 14, color: textColorSecondary),
+                    onTap: _logout,
+                  ),
+                  const Divider(height: 1, indent: 56),
+                  ListTile(
+                    leading: const Icon(Icons.delete_forever_rounded, color: Colors.red),
+                    title: const Text('Delete Account', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
+                    subtitle: const Text('Permanently remove app login & credentials', style: TextStyle(fontSize: 11, color: textColorSecondary)),
+                    trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 14, color: Colors.red),
+                    onTap: () => _showDeleteAccountDialog(context, ref),
+                  ),
+                ] else ...[
+                  const Divider(height: 1, indent: 56),
+                  ListTile(
+                    leading: const Icon(Icons.login_rounded, color: textColorPrimary),
+                    title: const Text('Sign In / Member Login', style: TextStyle(fontWeight: FontWeight.bold, color: textColorPrimary)),
+                    subtitle: const Text('Log in with your Customer Code & Password', style: TextStyle(fontSize: 11, color: textColorSecondary)),
+                    trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 14, color: textColorSecondary),
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (context) => const LoginScreen()),
+                    ),
+                  ),
+                  const Divider(height: 1, indent: 56),
+                  ListTile(
+                    leading: const Icon(Icons.delete_forever_rounded, color: Colors.red),
+                    title: const Text('Data Deletion Request', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
+                    subtitle: const Text('Request deletion of guest orders & phone data', style: TextStyle(fontSize: 11, color: textColorSecondary)),
+                    trailing: const Icon(Icons.open_in_new_rounded, size: 14, color: Colors.red),
+                    onTap: () async {
+                      final uri = Uri.parse('https://ojasthamke.github.io/OrderKart-delete-account/');
+                      if (await canLaunchUrl(uri)) {
+                        await launchUrl(uri, mode: LaunchMode.externalApplication);
+                      }
+                    },
+                  ),
+                ],
               ],
             ),
           ),

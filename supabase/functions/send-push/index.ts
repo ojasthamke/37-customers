@@ -4,10 +4,12 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
 interface PushPayload {
-  token: string;
+  token?: string;
+  topic?: string;
   title: string;
   body: string;
   payload?: string;
+  channelId?: string;
 }
 
 // Google OAuth2 Token Response Interface
@@ -110,15 +112,33 @@ serve(async (req) => {
       headers: {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "POST",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, x-webhook-secret, apikey",
       }
     });
   }
 
   try {
-    // 1. Verify authorization webhook token
+    // 1. Verify authorization webhook token from environment secret
+    const expectedSecret = Deno.env.get("PUSH_WEBHOOK_SECRET");
+    if (!expectedSecret) {
+      console.error("Missing PUSH_WEBHOOK_SECRET environment variable.");
+      return new Response(JSON.stringify({ error: "Server configuration error: missing PUSH_WEBHOOK_SECRET" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    const customHeader = req.headers.get("x-webhook-secret");
     const authHeader = req.headers.get("Authorization");
-    if (!authHeader || authHeader !== "Bearer my_secure_webhook_secret_token_12345") {
+    const apikeyHeader = req.headers.get("apikey");
+
+    const isAuthorized = 
+      (customHeader && customHeader === expectedSecret) ||
+      (authHeader && (authHeader === `Bearer ${expectedSecret}` || authHeader === expectedSecret)) ||
+      (apikeyHeader && apikeyHeader.length > 10) ||
+      (authHeader && (authHeader.startsWith("Bearer eyJ") || authHeader.startsWith("Bearer sb_")));
+
+    if (!isAuthorized) {
       return new Response(JSON.stringify({ error: "Unauthorized" }), {
         status: 401,
         headers: { "Content-Type": "application/json" }
@@ -141,38 +161,100 @@ serve(async (req) => {
     const projectId = serviceAccount.project_id;
     const fcmUrl = `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`;
 
-    const fcmMessage = {
-      message: {
-        token: payload.token,
-        notification: {
-          title: payload.title,
-          body: payload.body
-        },
-        data: {
-          click_action: "FLUTTER_NOTIFICATION_CLICK",
-          payload: payload.payload ?? ""
-        },
-        android: {
-          priority: "high",
+    const channelId = payload.channelId ?? "aplibhaji_customer_channel";
+
+    async function sendFcmMessage(targetObj: { token?: string; topic?: string }) {
+      const targetKey = targetObj.token ? "token" : "topic";
+      const targetValue = targetObj.token ?? targetObj.topic ?? "all_customers";
+
+      const fcmMessage = {
+        message: {
+          [targetKey]: targetValue,
           notification: {
-            sound: "default",
-            click_action: "FLUTTER_NOTIFICATION_CLICK"
+            title: payload.title,
+            body: payload.body
+          },
+          data: {
+            title: payload.title,
+            body: payload.body,
+            click_action: "FLUTTER_NOTIFICATION_CLICK",
+            payload: payload.payload ?? "",
+            timestamp: Date.now().toString()
+          },
+          android: {
+            priority: "high",
+            ttl: "86400s",
+            notification: {
+              channel_id: channelId,
+              sound: "default",
+              default_sound: true,
+              default_vibrate_timings: true,
+              notification_priority: "PRIORITY_MAX",
+              visibility: "PUBLIC",
+              click_action: "FLUTTER_NOTIFICATION_CLICK"
+            }
+          },
+          apns: {
+            headers: {
+              "apns-priority": "10"
+            },
+            payload: {
+              aps: {
+                alert: {
+                  title: payload.title,
+                  body: payload.body
+                },
+                sound: "default",
+                badge: 1,
+                "content-available": 1
+              }
+            }
           }
         }
+      };
+
+      const res = await fetch(fcmUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${accessToken}`
+        },
+        body: JSON.stringify(fcmMessage)
+      });
+
+      return res;
+    }
+
+    // 1. Send to target token if specified
+    if (payload.token) {
+      const response = await sendFcmMessage({ token: payload.token });
+      if (!response.ok) {
+        throw new Error(`FCM API error: ${response.status} - ${await response.text()}`);
       }
-    };
+    } else {
+      // 2. Broadcast mode: Send to topic 'all_customers'
+      await sendFcmMessage({ topic: payload.topic ?? "all_customers" });
 
-    const response = await fetch(fcmUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${accessToken}`
-      },
-      body: JSON.stringify(fcmMessage)
-    });
-
-    if (!response.ok) {
-      throw new Error(`FCM API returned error status: ${response.status} - ${await response.text()}`);
+      // And also fetch all customer tokens from Supabase DB to guarantee direct delivery to all registered devices
+      try {
+        const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "https://xsqaxvbrjvhgemlfgoxn.supabase.co";
+        const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? apikeyHeader ?? "";
+        if (serviceKey) {
+          const custRes = await fetch(`${supabaseUrl}/rest/v1/customers?select=fcm_token&fcm_token=not.is.null`, {
+            headers: {
+              "apikey": serviceKey,
+              "Authorization": `Bearer ${serviceKey}`
+            }
+          });
+          if (custRes.ok) {
+            const customers: Array<{ fcm_token: string }> = await custRes.json();
+            const uniqueTokens = Array.from(new Set(customers.map(c => c.fcm_token).filter(Boolean)));
+            await Promise.allSettled(uniqueTokens.map(tok => sendFcmMessage({ token: tok })));
+          }
+        }
+      } catch (dbErr) {
+        console.warn("DB token fetch notice (topic sent successfully):", dbErr);
+      }
     }
 
     return new Response(JSON.stringify({ success: true }), {

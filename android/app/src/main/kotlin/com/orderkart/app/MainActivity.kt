@@ -1,4 +1,4 @@
-package com.example.aplibhaji_customers
+package com.orderkart.app
 
 import android.os.Build
 import android.view.WindowManager
@@ -35,4 +35,3 @@ class MainActivity: FlutterActivity() {
         } catch (_: Exception) {}
     }
 }
-

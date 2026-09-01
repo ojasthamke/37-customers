@@ -389,13 +389,13 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
   }
 
   late final AnimationController _controller;
-  late final Animation<double> _receiptReveal;
-  late final Animation<double> _receiptSettle;
+  late final Animation<double> _revealProgress;
+  late final Animation<double> _settleProgress;
   late final Animation<double> _badgeScale;
   late final Animation<double> _checkmarkDraw;
   late final Animation<double> _sparkles;
   late final Animation<double> _contentFade;
-  late final Animation<double> _actionButtons;
+  late final Animation<double> _actionButtonsFade;
   late final List<SparkleParticle> _particles;
 
   @override
@@ -406,31 +406,31 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
       duration: const Duration(milliseconds: 1400),
     );
 
-    _receiptReveal = CurvedAnimation(
+    _revealProgress = CurvedAnimation(
       parent: _controller,
-      curve: const Interval(0.00, 0.45, curve: Curves.easeOutCubic),
+      curve: const Interval(0.00, 0.65, curve: Curves.easeOutCubic),
     );
-    _receiptSettle = CurvedAnimation(
+    _settleProgress = CurvedAnimation(
       parent: _controller,
-      curve: const Interval(0.40, 0.58, curve: Curves.easeOutBack),
+      curve: const Interval(0.55, 0.85, curve: Curves.easeOutBack),
     );
     _badgeScale = CurvedAnimation(
       parent: _controller,
-      curve: const Interval(0.40, 0.65, curve: Curves.elasticOut),
+      curve: const Interval(0.45, 0.75, curve: Curves.easeOutBack),
     );
     _checkmarkDraw = CurvedAnimation(
       parent: _controller,
-      curve: const Interval(0.45, 0.70, curve: Curves.easeOutCubic),
+      curve: const Interval(0.60, 0.90, curve: Curves.easeOutCubic),
     );
     _sparkles = CurvedAnimation(
       parent: _controller,
-      curve: const Interval(0.45, 0.85, curve: Curves.easeOutQuart),
+      curve: const Interval(0.60, 1.00, curve: Curves.easeOutQuart),
     );
     _contentFade = CurvedAnimation(
       parent: _controller,
-      curve: const Interval(0.30, 0.65, curve: Curves.easeOut),
+      curve: const Interval(0.20, 0.65, curve: Curves.easeOut),
     );
-    _actionButtons = CurvedAnimation(
+    _actionButtonsFade = CurvedAnimation(
       parent: _controller,
       curve: const Interval(0.65, 1.00, curve: Curves.easeOutCubic),
     );
@@ -456,8 +456,8 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
       final value = _controller.value;
       if (!mounted) return;
 
-      // Strong vibration of 2 seconds when checkmark drawing starts (at 0.45)
-      if (value >= 0.45 && !_hasCheckmarkHaptic) {
+      // Haptic vibration when checkmark draws (at 0.65)
+      if (value >= 0.65 && !_hasCheckmarkHaptic) {
         _hasCheckmarkHaptic = true;
         _vibrateFor2Seconds();
       }
@@ -510,7 +510,7 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
     final formattedDateTime = _formatNow();
     final formattedDeliveryDate = _formatDeliveryDate(deliveryDateStr);
 
-    final staticTicketBody = _buildTicket(orderNo, customerName, formattedDateTime, formattedDeliveryDate);
+    final ticketBody = _buildTicket(orderNo, customerName, formattedDateTime, formattedDeliveryDate);
 
     return Scaffold(
       backgroundColor: const Color(0xFFF3F5FA),
@@ -548,7 +548,7 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
               ),
             ),
 
-            // Main ticket area (Animated Slide + Dispenser)
+            // Main ticket area with smooth Metallic Dispenser emergence animation
             Positioned.fill(
               top: 75, bottom: 84,
               child: Center(
@@ -556,13 +556,12 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
                   physics: const BouncingScrollPhysics(),
                   padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
                   child: AnimatedBuilder(
-                    animation: _receiptReveal,
-                    child: staticTicketBody,
+                    animation: _controller,
                     builder: (context, child) {
                       return MetallicPrinterDispenserWidget(
-                        revealProgress: _receiptReveal.value,
-                        settleProgress: _receiptSettle.value,
-                        child: child!,
+                        revealProgress: _revealProgress.value,
+                        settleProgress: _settleProgress.value,
+                        child: ticketBody,
                       );
                     },
                   ),
@@ -570,19 +569,15 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
               ),
             ),
 
-            // Bottom action buttons
+            // Bottom action buttons with smooth fade-in (Always interactive & clickable)
             Positioned(
               bottom: 20, left: 20, right: 20,
               child: AnimatedBuilder(
-                animation: _actionButtons,
-                builder: (context, _) {
-                  final val = _actionButtons.value;
+                animation: _actionButtonsFade,
+                builder: (context, child) {
                   return Opacity(
-                    opacity: val.clamp(0.0, 1.0),
-                    child: Transform.translate(
-                      offset: Offset(0, 18 * (1.0 - val)),
-                      child: _buildActionButtons(orderNo, customerName),
-                    ),
+                    opacity: _actionButtonsFade.value.clamp(0.0, 1.0),
+                    child: _buildActionButtons(orderNo, customerName),
                   );
                 },
               ),
@@ -612,9 +607,11 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
                 'assets/orderkart_logo.png',
                 height: 58,
                 width: 186,
+                cacheHeight: 120,
                 fit: BoxFit.contain,
               ),
             ),
+
             const SizedBox(height: 12),
 
             // Success badge + sparkles (Isolated AnimatedBuilder)
@@ -819,9 +816,7 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
               minimumSize: const Size(0, 52),
             ),
-            onPressed: _actionButtons.value > 0.5
-                ? () => _showSupportModal(context, orderNo, customerName)
-                : null,
+            onPressed: () => _showSupportModal(context, orderNo, customerName),
             icon: const Icon(Icons.headset_mic_rounded, size: 18, color: Color(0xFF0F172A)),
             label: const Text('Help', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
           ),
@@ -841,18 +836,16 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
                   shadowColor: const Color(0xFF0F172A).withValues(alpha: 0.35),
                   minimumSize: const Size(0, 52),
                 ),
-                onPressed: _actionButtons.value > 0.5
-                    ? () {
-                        ref.read(activeTabProvider.notifier).state = 2;
-                        final String orderId = widget.order['id'] as String;
-                        Navigator.pushReplacement(
-                          context,
-                          MaterialPageRoute(
-                            builder: (context) => OrderDetailsScreen(orderId: orderId),
-                          ),
-                        );
-                      }
-                    : null,
+                onPressed: () {
+                  ref.read(activeTabProvider.notifier).state = 3;
+                  final String orderId = (widget.order['id'] ?? '').toString();
+                  Navigator.pushReplacement(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => OrderDetailsScreen(orderId: orderId),
+                    ),
+                  );
+                },
                 child: const Text('View Order Details →', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, letterSpacing: 0.5)),
               );
             },

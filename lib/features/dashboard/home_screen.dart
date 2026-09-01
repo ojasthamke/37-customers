@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -20,6 +21,7 @@ import '../../core/utils/schedule_helper.dart';
 import '../../core/widgets/quantity_selector.dart';
 import '../../core/utils/string_utils.dart';
 import '../../core/services/notification_service.dart';
+import '../../core/database/providers.dart';
 import '../../core/widgets/glass_container.dart';
 import '../../core/widgets/skeleton_loader.dart';
 import '../../core/widgets/animated_slashed_text.dart';
@@ -58,14 +60,23 @@ class HomeScreen extends ConsumerStatefulWidget {
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   int get _currentTab => ref.read(activeTabProvider);
   set _currentTab(int index) => ref.read(activeTabProvider.notifier).state = index;
-  StreamSubscription? _notificationSub;
-  final Set<String> _seenNotifIds = {};
   bool _shrinkActiveOrders = false;
   bool _userExpanded = false;
+  bool _isLoadingReorder = false;
+  DateTime? _lastActionTime;
   Timer? _shrinkTimer;
   Timer? _autoScrollTimer;
   final ScrollController _homeScrollController = ScrollController();
   final GlobalKey _productsSectionKey = GlobalKey();
+
+  bool _canPerformAction() {
+    final now = DateTime.now();
+    if (_lastActionTime != null && now.difference(_lastActionTime!) < const Duration(milliseconds: 400)) {
+      return false;
+    }
+    _lastActionTime = now;
+    return true;
+  }
 
   void _scrollToProductsSection() {
     final ctx = _productsSectionKey.currentContext;
@@ -85,29 +96,73 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   void _handleReorderTap(BuildContext context, WidgetRef ref, Map<String, dynamic> lastOrder) async {
+    if (_isLoadingReorder || !_canPerformAction()) return;
     final items = lastOrder['order_items'] as List<dynamic>? ?? [];
     if (items.isEmpty) return;
+
+    final productIds = items
+        .map((i) => i['product_id']?.toString())
+        .where((id) => id != null && id.isNotEmpty)
+        .cast<String>()
+        .toList();
+
+    if (productIds.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No reorderable items found in this order.')),
+      );
+      return;
+    }
+
+    _isLoadingReorder = true;
+    bool isDialogVisible = true;
+    void dismissLoading() {
+      if (isDialogVisible && context.mounted) {
+        Navigator.pop(context);
+        isDialogVisible = false;
+      }
+    }
 
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => const Center(child: CircularProgressIndicator()),
+      builder: (context) => const PopScope(
+        canPop: false,
+        child: Center(child: CircularProgressIndicator()),
+      ),
     );
     try {
       final client = Supabase.instance.client;
-      final productIds = items.map((i) => i['product_id'] as String).toList();
       final response = await client.from('products').select().inFilter('id', productIds);
       if (!context.mounted) return;
-      Navigator.pop(context);
+      dismissLoading();
       final currentProducts = List<Map<String, dynamic>>.from(response);
       if (!context.mounted) return;
       _showReorderDialog(context, ref, items, currentProducts);
-    } catch (e) {
-      if (!context.mounted) return;
-      Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to load current prices: $e'), backgroundColor: Colors.red),
-      );
+    } catch (_) {
+      try {
+        // Offline / fallback: Read cached products from local SQLite repository
+        final localRepo = ref.read(catalogRepositoryProvider);
+        final allLocal = await localRepo.getProducts();
+        final currentProducts = allLocal.where((p) => productIds.contains(p['id']?.toString())).toList();
+        if (!context.mounted) return;
+        dismissLoading();
+        if (currentProducts.isNotEmpty) {
+          _showReorderDialog(context, ref, items, currentProducts);
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Could not load products. Please check your connection.')),
+          );
+        }
+      } catch (e) {
+        if (!context.mounted) return;
+        dismissLoading();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to load current prices: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      dismissLoading();
+      _isLoadingReorder = false;
     }
   }
 
@@ -147,67 +202,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   void _setupNotificationListener() {
     try {
-      final client = Supabase.instance.client;
-      _notificationSub = client
-          .from('notifications')
-          .stream(primaryKey: ['id'])
-          .listen((List<Map<String, dynamic>> list) {
-        
-        final customer = ref.read(authProvider).customer;
-        final currentCustId = customer?['id'] as String?;
-        if (currentCustId == null) return;
-
-        // If it's the very first load, just populate seen IDs to avoid showing historic alerts
-        final bool isFirstLoad = _seenNotifIds.isEmpty;
-
-        for (final notif in list) {
-          final id = notif['id'] as String;
-          final title = notif['title'] ?? 'Notification';
-          final body = notif['body'] ?? '';
-          final targetCustId = notif['customer_id'] as String?;
-          final createdAtStr = notif['created_at'] as String?;
-
-          // Filter out historic notifications older than 90 seconds (MB-02 / startup fix)
-          if (createdAtStr != null) {
-            final createdAt = DateTime.tryParse(createdAtStr);
-            if (createdAt != null) {
-              final diffSeconds = DateTime.now().difference(createdAt.toLocal()).inSeconds.abs();
-              if (diffSeconds > 90) {
-                _seenNotifIds.add(id);
-                continue;
-              }
-            }
-          }
-
-          if (targetCustId == null || targetCustId == currentCustId) {
-            if (!_seenNotifIds.contains(id)) {
-              _seenNotifIds.add(id);
-              
-              // Only trigger notification banner for newly inserted alerts (not historic ones)
-              if (!isFirstLoad) {
-                final orderNoMatch = RegExp(r'#ORD-\d+').firstMatch('$title $body');
-                final String? orderNumber = orderNoMatch?.group(0);
-                final String notificationPayload = orderNumber != null ? 'order_$orderNumber' : 'promo_$id';
-
-                NotificationService.instance.showNotification(
-                  id: id.hashCode,
-                  title: title,
-                  body: body,
-                  payload: notificationPayload,
-                );
-              }
-            }
-          }
-        }
-      }, onError: (e) {
-        debugPrint('Notification stream error: $e');
-      });
+      final customer = ref.read(authProvider).customer;
+      final currentCustId = customer?['id']?.toString();
+      NotificationService.instance.startRealtimeNotificationSync(customerId: currentCustId);
     } catch (e) {
-      debugPrint('Failed to set up notification stream: $e');
+      debugPrint('Failed to set up notification sync: $e');
     }
   }
 
   void _showHelpBottomSheet(BuildContext context) {
+    if (!_canPerformAction()) return;
     showModalBottomSheet(
       context: context,
       backgroundColor: bgCard,
@@ -235,6 +239,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     ),
                     IconButton(
                       icon: const Icon(Icons.close_rounded, color: textColorSecondary),
+                      tooltip: 'Close',
                       onPressed: () => Navigator.pop(context),
                     ),
                   ],
@@ -253,7 +258,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   onPressed: () async {
                     Navigator.pop(context);
                     final customer = ref.read(authProvider).customer;
-                    final String rawName = sanitizeCustomerName(customer?['name']);
+                    final String rawName = sanitizeCustomerName(customer?['name'], customerCode: customer?['customer_code']);
                     final String msg = 'Hello Orderkart Support! I am $rawName, and I need assistance with my order.';
                     final String encodedMsg = Uri.encodeComponent(msg);
                     final whatsappUri = Uri.parse('whatsapp://send?phone=919021107009&text=$encodedMsg');
@@ -372,7 +377,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   @override
   void dispose() {
-    _notificationSub?.cancel();
     _shrinkTimer?.cancel();
     _autoScrollTimer?.cancel();
     _homeScrollController.dispose();
@@ -437,8 +441,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       }
     });
 
-    final cartItemCount = ref.watch(activeCartProvider.select((c) => c.itemCount));
-    final cartSubtotal = ref.watch(activeCartProvider.select((c) => c.subtotal));
+    final normalCart = ref.watch(cartProvider);
+    final normalCartCount = normalCart.itemCount;
+    final normalCartSubtotal = normalCart.subtotal;
+    final quickCartCount = ref.watch(quickCartProvider.select((c) => c.itemCount));
+    final totalCartCount = normalCartCount + quickCartCount;
 
     // Body widgets corresponding to tabs
     final List<Widget> tabs = [
@@ -481,6 +488,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         leading: _currentTab != 0
             ? IconButton(
                 icon: const Icon(Icons.arrow_back_ios_new_rounded, color: textColorPrimary, size: 20),
+                tooltip: 'Back',
                 onPressed: () {
                   HapticFeedback.lightImpact();
                   _handleBackPressed();
@@ -498,7 +506,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   ref.invalidate(popularProductsProvider);
                   ref.invalidate(lastOrderProvider);
                   ref.invalidate(orderListProvider);
-                  ref.invalidate(cartProvider);
                   ref.invalidate(appSettingsProvider);
                   ref.invalidate(authProvider);
                   if (_homeScrollController.hasClients) {
@@ -584,11 +591,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               children: [
                 IconButton(
                   icon: const Icon(Icons.shopping_cart_outlined, color: textColorPrimary, size: 26),
+                  tooltip: 'Shopping Cart',
                   onPressed: () {
                     _onTabChanged(1);
                   },
                 ),
-                if (cartItemCount > 0)
+                if (totalCartCount > 0)
                   Positioned(
                     right: 4,
                     top: 4,
@@ -600,7 +608,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                       ),
                       constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
                       child: Text(
-                        cartItemCount.toString(),
+                        totalCartCount.toString(),
                         style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
                         textAlign: TextAlign.center,
                       ),
@@ -693,12 +701,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             index: _currentTab,
             children: tabs,
           ),
-          if (_currentTab == 0 && cartItemCount > 0)
+          if (_currentTab == 0 && normalCartCount > 0)
             Positioned(
               left: 16,
               right: 16,
               bottom: 16,
-              child: _buildFloatingCartBar(cartItemCount, cartSubtotal),
+              child: _buildFloatingCartBar(normalCartCount, normalCartSubtotal),
             ),
         ],
       ),
@@ -713,7 +721,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
                 _buildNavItem(0, Icons.home_outlined, Icons.home_rounded, 'Home'),
-                _buildNavItem(1, Icons.shopping_cart_outlined, Icons.shopping_cart_rounded, 'Cart', badgeCount: cartItemCount),
+                _buildNavItem(1, Icons.shopping_cart_outlined, Icons.shopping_cart_rounded, 'Cart', badgeCount: totalCartCount),
                 GestureDetector(
                   onTap: () {
                     HapticFeedback.lightImpact();
@@ -828,7 +836,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final categoriesAsync = ref.watch(categoriesProvider);
     final popularProductsAsync = ref.watch(popularProductsProvider);
     final customer = ref.watch(authProvider).customer;
-    final welcomeName = sanitizeCustomerName(customer?['name']);
+    final welcomeName = sanitizeCustomerName(customer?['name'], customerCode: customer?['customer_code']);
 
     if (categoriesAsync.isLoading || popularProductsAsync.isLoading) {
       return Container(
@@ -1104,7 +1112,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   final orderNo = order['order_number'] ?? order['offline_order_no'] ?? 'N/A';
                   final orderType = order['order_type'] ?? 'Normal';
                   final status = order['status'] ?? 'Pending';
-                  final items = order['order_items'] as List<dynamic>? ?? [];
+                  List<dynamic> items = [];
+                  final rawItems = order['order_items'];
+                  if (rawItems is List) {
+                    items = rawItems;
+                  } else if (rawItems is String && rawItems.trim().isNotEmpty) {
+                    try {
+                      final decoded = json.decode(rawItems);
+                      if (decoded is List) items = decoded;
+                    } catch (_) {}
+                  }
                   final deliveryDateStr = order['delivery_date']?.toString();
                   
                   DateTime? deliveryDate;
@@ -1138,10 +1155,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   }
 
                   void onTap() {
+                    if (orderId == null || !_canPerformAction()) return;
+                    HapticFeedback.lightImpact();
                     Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (context) => OrderDetailsScreen(orderId: orderId),
+                        builder: (context) => OrderDetailsScreen(orderId: orderId.toString()),
                       ),
                     );
                   }
@@ -1373,6 +1392,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                           return GestureDetector(
                             behavior: HitTestBehavior.opaque,
                             onTap: () {
+                              if (!_canPerformAction()) return;
                               HapticFeedback.lightImpact();
                               Navigator.push(
                                 context,
@@ -1461,9 +1481,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   ),
                 ),
               ),
-              error: (err, stack) => Padding(
-                padding: const EdgeInsets.symmetric(vertical: 16.0),
-                child: Text('Error: $err'),
+              error: (err, stack) => _buildErrorRetryCard(
+                message: 'Unable to load categories',
+                onRetry: () => ref.refresh(categoriesProvider),
               ),
             ),
 
@@ -1492,7 +1512,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   ),
                 );
               },
-              error: (err, stack) => Center(child: Text('Error loading popular products: $err')),
+              error: (err, stack) => _buildErrorRetryCard(
+                message: 'Unable to load products',
+                onRetry: () => ref.refresh(popularProductsProvider),
+              ),
               data: (products) {
                 if (products.isEmpty) {
                   return const Center(child: Text('No products available.'));
@@ -1641,6 +1664,49 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
+  Widget _buildErrorRetryCard({required String message, required VoidCallback onRetry}) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(vertical: 8),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Column(
+        children: [
+          const Icon(Icons.wifi_off_rounded, color: Color(0xFF6E7E73), size: 28),
+          const SizedBox(height: 8),
+          Text(
+            message,
+            style: GoogleFonts.outfit(fontWeight: FontWeight.bold, color: textColorPrimary, fontSize: 14),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Please check your internet connection.',
+            style: GoogleFonts.inter(color: textColorSecondary, fontSize: 12),
+          ),
+          const SizedBox(height: 10),
+          OutlinedButton.icon(
+            onPressed: () {
+              HapticFeedback.lightImpact();
+              onRetry();
+            },
+            icon: const Icon(Icons.refresh_rounded, size: 16),
+            label: const Text('Try Again'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: textColorPrimary,
+              side: const BorderSide(color: textColorPrimary),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   IconData _getCategoryIcon(String categoryName) {
     final name = categoryName.toLowerCase();
     if (name.contains('veg')) return Icons.eco_rounded;
@@ -1663,17 +1729,33 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     // Map to hold selected quantities of items
     final Map<String, Map<String, dynamic>> selectedItems = {};
     for (var item in items) {
-      final pid = item['product_id'] as String;
-      final currentProd = currentProducts.firstWhere((p) => p['id'] == pid, orElse: () => {});
-      if (currentProd.isEmpty || currentProd['is_enabled'] == false || currentProd['is_available'] == false) {
-        continue; // Skip unavailable products
+      final pid = item['product_id']?.toString() ?? '';
+      if (pid.isEmpty) continue;
+      final currentProd = currentProducts.firstWhere((p) => p['id']?.toString() == pid, orElse: () => {});
+      final double stock = (currentProd['stock'] is num)
+          ? (currentProd['stock'] as num).toDouble()
+          : (double.tryParse(currentProd['stock']?.toString() ?? '') ?? 0.0);
+      if (currentProd.isEmpty ||
+          currentProd['is_enabled'] == false ||
+          currentProd['is_available'] == false ||
+          stock <= 0) {
+        continue; // Skip out-of-stock and unavailable products
       }
+      final double rawQty = (item['quantity'] is num)
+          ? (item['quantity'] as num).toDouble()
+          : (double.tryParse(item['quantity']?.toString() ?? '') ?? 1.0);
+      final double clampedQty = rawQty > stock ? stock : rawQty;
+      final double price = (currentProd['price'] is num)
+          ? (currentProd['price'] as num).toDouble()
+          : (double.tryParse(currentProd['price']?.toString() ?? '') ?? 0.0);
+
       selectedItems[pid] = {
         'product_id': pid,
         'product_name': currentProd['name'] ?? item['product_name'] ?? 'N/A',
-        'price': (currentProd['price'] as num?)?.toDouble() ?? 0.0,
+        'price': price,
         'unit': currentProd['unit'] ?? item['unit'] ?? '',
-        'quantity': (item['quantity'] as num?)?.toDouble() ?? 1.0,
+        'quantity': (clampedQty * 1000).round() / 1000.0,
+        'image_path': currentProd['image_path'] ?? item['image_path'],
       };
     }
 
@@ -1754,6 +1836,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                         ),
                         IconButton(
                           icon: const Icon(Icons.close_rounded, color: Color(0xFF6E7E73)),
+                          tooltip: 'Close',
                           onPressed: () => Navigator.pop(context),
                         ),
                       ],
@@ -1769,11 +1852,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                       child: SingleChildScrollView(
                         child: Column(
                           children: selectedItems.values.map((item) {
-                            final pid = item['product_id'] as String;
-                            final name = item['product_name'] as String;
-                            final price = item['price'] as double;
-                            final unit = item['unit'] as String;
-                            final qty = item['quantity'] as double;
+                            final pid = item['product_id']?.toString() ?? '';
+                            final name = item['product_name']?.toString() ?? '';
+                            final price = (item['price'] as num?)?.toDouble() ?? 0.0;
+                            final unit = item['unit']?.toString() ?? '';
+                            final qty = (item['quantity'] as num?)?.toDouble() ?? 1.0;
 
                             return Padding(
                               padding: const EdgeInsets.symmetric(vertical: 8.0),
@@ -1800,10 +1883,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                     children: [
                                       IconButton(
                                         icon: const Icon(Icons.remove_circle_outline_rounded, color: Color(0xFF6E7E73)),
+                                        tooltip: 'Decrease quantity',
                                         onPressed: () {
                                           setState(() {
+                                            final double roundedQty = (qty * 1000).round() / 1000.0;
                                             final steps = getQuantitySteps(unit);
-                                            final prevIndex = steps.lastIndexWhere((s) => s < qty);
+                                            final prevIndex = steps.lastIndexWhere((s) => s < roundedQty - 0.001);
                                             if (prevIndex != -1) {
                                               item['quantity'] = steps[prevIndex];
                                             } else {
@@ -1818,14 +1903,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                       ),
                                       IconButton(
                                         icon: const Icon(Icons.add_circle_outline_rounded, color: Color(0xFF1B3624)),
+                                        tooltip: 'Increase quantity',
                                         onPressed: () {
                                           setState(() {
+                                            final double roundedQty = (qty * 1000).round() / 1000.0;
                                             final steps = getQuantitySteps(unit);
-                                            final nextIndex = steps.indexWhere((s) => s > qty);
+                                            final nextIndex = steps.indexWhere((s) => s > roundedQty + 0.001);
                                             if (nextIndex != -1) {
                                               item['quantity'] = steps[nextIndex];
                                             } else {
-                                              item['quantity'] = qty + 1.0;
+                                              item['quantity'] = ((roundedQty + 1.0) * 1000).round() / 1000.0;
                                             }
                                           });
                                         },
@@ -1851,18 +1938,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                         final cartNotifier = ref.read(cartProvider.notifier);
                         for (var item in selectedItems.values) {
                           cartNotifier.addItem(
-                            productId: item['product_id'],
-                            productName: item['product_name'],
-                            price: item['price'],
-                            unit: item['unit'],
-                            quantity: item['quantity'],
+                            productId: item['product_id']?.toString() ?? '',
+                            productName: item['product_name']?.toString() ?? '',
+                            price: (item['price'] as num?)?.toDouble() ?? 0.0,
+                            unit: item['unit']?.toString() ?? '',
+                            quantity: (item['quantity'] as num?)?.toDouble() ?? 1.0,
+                            imagePath: item['image_path']?.toString(),
                           );
                         }
                         
-                        setState(() {
-                          _currentTab = 1; // Go to Cart tab
-                        });
                         Navigator.pop(context); // Close bottom sheet
+                        _onTabChanged(1); // Standard navigation to Cart tab
                         
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(
@@ -1964,24 +2050,33 @@ class PopularProductCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final existingCartItem = ref.watch(cartProvider.select((state) => state.items[p['id']]));
+    final String productId = p['id']?.toString() ?? '';
+    final existingCartItem = ref.watch(cartProvider.select((state) => state.items[productId]));
     final isInCart = existingCartItem != null;
-    final double stock = (p['stock'] as num?)?.toDouble() ?? 0.0;
-    final isAvailable = (p['is_available'] == true || p['is_available'] == 1) && stock > 0;
-    final name = p['name'] ?? '';
-    final price = (p['price'] as num?)?.toDouble() ?? 0.0;
-    final unit = p['unit'] ?? 'kg';
+    final double stock = (p['stock'] is num)
+        ? (p['stock'] as num).toDouble()
+        : (double.tryParse(p['stock']?.toString() ?? '') ?? 0.0);
+    final isAvailable = (p['is_available'] == true || p['is_available'] == 1 || p['is_available']?.toString() == '1' || p['is_available']?.toString().toLowerCase() == 'true') && stock > 0;
+    final name = p['name']?.toString() ?? '';
+    final double rawPrice = (p['price'] is num)
+        ? (p['price'] as num).toDouble()
+        : (double.tryParse(p['price']?.toString() ?? '') ?? 0.0);
+    final double price = rawPrice < 0 ? 0.0 : rawPrice;
+    final double rawMarketPrice = (p['market_price'] is num)
+        ? (p['market_price'] as num).toDouble()
+        : (double.tryParse(p['market_price']?.toString() ?? '') ?? 0.0);
+    final double marketPrice = rawMarketPrice < 0 ? 0.0 : rawMarketPrice;
+    final unit = p['unit']?.toString() ?? 'kg';
      
     final tags = _getProductTags(name);
-    final dbImageUrl = p['image_path'] as String?;
-    final imageUrl = (dbImageUrl != null && dbImageUrl.trim().isNotEmpty)
-        ? dbImageUrl
-        : _getProductImage(name);
+    final dbImageUrl = p['image_path'] as String? ?? p['image_url'] as String?;
+    final imageUrl = getProductImage(name, dbImageUrl);
 
     return GlassContainer(
       margin: const EdgeInsets.only(bottom: 20),
       borderRadius: 24,
       padding: const EdgeInsets.all(18.0),
+      isStockOut: !isAvailable,
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
@@ -2030,10 +2125,10 @@ class PopularProductCard extends ConsumerWidget {
                           fontSize: 21,
                         ),
                       ),
-                      if (p['market_price'] != null && (p['market_price'] as num).toDouble() > price) ...[
+                      if (marketPrice > price) ...[
                         const SizedBox(width: 8),
                         AnimatedSlashedText(
-                          text: '₹${((p['market_price'] as num).toDouble() / 4).toStringAsFixed(0)}',
+                          text: '₹${(marketPrice / 4).toStringAsFixed(0)}',
                           style: GoogleFonts.inter(
                             color: Colors.grey[600],
                             fontWeight: FontWeight.bold,
@@ -2054,10 +2149,10 @@ class PopularProductCard extends ConsumerWidget {
                           fontSize: 13,
                         ),
                       ),
-                      if (p['market_price'] != null && (p['market_price'] as num).toDouble() > price) ...[
+                      if (marketPrice > price) ...[
                         const SizedBox(width: 8),
                         AnimatedSlashedText(
-                          text: '₹${(p['market_price'] as num).toDouble().toStringAsFixed(0)}',
+                          text: '₹${marketPrice.toStringAsFixed(0)}',
                           style: GoogleFonts.inter(
                             color: Colors.grey[600],
                             fontWeight: FontWeight.bold,
@@ -2080,10 +2175,10 @@ class PopularProductCard extends ConsumerWidget {
                           fontSize: 21,
                         ),
                       ),
-                      if (p['market_price'] != null && (p['market_price'] as num).toDouble() > price) ...[
+                      if (marketPrice > price) ...[
                         const SizedBox(width: 8),
                         AnimatedSlashedText(
-                          text: '₹${(p['market_price'] as num).toDouble().toStringAsFixed(0)}',
+                          text: '₹${marketPrice.toStringAsFixed(0)}',
                           style: GoogleFonts.inter(
                             color: Colors.grey[600],
                             fontWeight: FontWeight.bold,
@@ -2104,63 +2199,103 @@ class PopularProductCard extends ConsumerWidget {
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               // Product Image (Card Overlay style)
-              ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: SizedBox(
-                  height: 100,
-                  width: 120,
-                  child: Image.network(
-                    imageUrl,
-                    height: 100,
-                    width: 120,
-                    cacheWidth: 360,
-                    cacheHeight: 300,
-                    fit: BoxFit.cover,
-                    errorBuilder: (context, error, stackTrace) {
-                      return Image.network(
-                        _getProductImage(name),
+              Stack(
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: SizedBox(
+                      height: 100,
+                      width: 120,
+                      child: Image.network(
+                        imageUrl,
                         height: 100,
                         width: 120,
                         cacheWidth: 360,
                         cacheHeight: 300,
                         fit: BoxFit.cover,
                         errorBuilder: (context, error, stackTrace) {
-                          return Container(
+                          return Image.network(
+                            _getProductImage(name),
                             height: 100,
                             width: 120,
-                            color: const Color(0xFFE8F5E9),
-                            child: const Icon(Icons.eco_rounded, color: Color(0xFF2E6F40), size: 36),
+                            cacheWidth: 360,
+                            cacheHeight: 300,
+                            fit: BoxFit.cover,
+                            errorBuilder: (context, error, stackTrace) {
+                              return Container(
+                                height: 100,
+                                width: 120,
+                                color: const Color(0xFFE8F5E9),
+                                child: const Icon(Icons.eco_rounded, color: Color(0xFF2E6F40), size: 36),
+                              );
+                            },
                           );
                         },
-                      );
-                    },
+                      ),
+                    ),
                   ),
-                ),
+                  if (!isAvailable)
+                    Positioned.fill(
+                      child: Container(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(16),
+                          color: Colors.black.withValues(alpha: 0.35),
+                        ),
+                        child: Center(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFEF4444),
+                              borderRadius: BorderRadius.circular(8),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: const Color(0xFFEF4444).withValues(alpha: 0.5),
+                                  blurRadius: 8,
+                                  offset: const Offset(0, 2),
+                                ),
+                              ],
+                            ),
+                            child: Text(
+                              'OUT OF STOCK',
+                              style: GoogleFonts.outfit(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w900,
+                                fontSize: 10,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
               ),
               const SizedBox(height: 12),
               // Button
               if (!isAvailable)
-                SizedBox(
+                Container(
                   height: 34,
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.grey[200],
-                      foregroundColor: Colors.grey[500],
-                      elevation: 0,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(17),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFEF2F2),
+                    borderRadius: BorderRadius.circular(17),
+                    border: Border.all(color: const Color(0xFFEF4444), width: 1.2),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.block_rounded, color: Color(0xFFDC2626), size: 13),
+                      const SizedBox(width: 4),
+                      Text(
+                        'OUT OF STOCK',
+                        style: GoogleFonts.inter(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 9,
+                          color: const Color(0xFFDC2626),
+                          letterSpacing: 0.5,
+                        ),
                       ),
-                      padding: const EdgeInsets.symmetric(horizontal: 10),
-                    ),
-                    onPressed: null,
-                    child: Text(
-                      'OUT OF STOCK',
-                      style: GoogleFonts.inter(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 9,
-                        letterSpacing: 0.5,
-                      ),
-                    ),
+                    ],
                   ),
                 )
               else if (!isInCart)
@@ -2206,12 +2341,13 @@ class PopularProductCard extends ConsumerWidget {
                     children: [
                       IconButton(
                         icon: const Icon(Icons.remove_rounded, color: Colors.white, size: 14),
+                        tooltip: 'Decrease quantity',
                         padding: EdgeInsets.zero,
                         constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
                         onPressed: () {
                           HapticFeedback.lightImpact();
                           final step = _getStepSize(unit);
-                          ref.read(cartProvider.notifier).updateQuantity(p['id'], existingCartItem.quantity - step);
+                          ref.read(cartProvider.notifier).updateQuantity(productId, existingCartItem.quantity - step);
                         },
                       ),
                       GestureDetector(
@@ -2237,6 +2373,7 @@ class PopularProductCard extends ConsumerWidget {
                       ),
                       IconButton(
                         icon: const Icon(Icons.add_rounded, color: Colors.white, size: 14),
+                        tooltip: 'Increase quantity',
                         padding: EdgeInsets.zero,
                         constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
                         onPressed: () {
@@ -2308,22 +2445,22 @@ String _getProductImage(String productName) {
 
 String _formatSelectorQuantity(double qty, String unit) {
   final unitLower = unit.toLowerCase();
+  final roundedQty = (qty * 1000).round() / 1000.0;
   if (unitLower == 'kg') {
-    if (qty == 0.25) return '250 g';
-    if (qty == 0.5) return '500 g';
-    if (qty == 0.75) return '750 g';
-    final s = qty.toString();
-    if (s.endsWith('.0')) {
-      return '${qty.toInt()} kg';
+    if ((roundedQty - 0.25).abs() < 0.001) return '250 g';
+    if ((roundedQty - 0.50).abs() < 0.001) return '500 g';
+    if ((roundedQty - 0.75).abs() < 0.001) return '750 g';
+    if (roundedQty == roundedQty.toInt()) {
+      return '${roundedQty.toInt()} kg';
     }
-    return '$qty kg';
+    return '${roundedQty.toStringAsFixed(roundedQty * 10 == (roundedQty * 10).toInt() ? 1 : 2)} kg';
   } else if (unitLower == 'g' || unitLower == 'gram' || unitLower == 'grams') {
-    return '${qty.toInt()} g';
+    return '${roundedQty.toInt()} g';
   } else {
-    if (qty == qty.toInt()) {
-      return '${qty.toInt()} $unit';
+    if (roundedQty == roundedQty.toInt()) {
+      return '${roundedQty.toInt()} $unit';
     }
-    return '${qty.toStringAsFixed(1)} $unit';
+    return '${roundedQty.toStringAsFixed(1)} $unit';
   }
 }
 

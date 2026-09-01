@@ -35,25 +35,64 @@ class DatabaseHelper {
 
     return openDatabase(
       path,
-      version: 8,
+      version: 9,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
       onOpen: (db) async {
         try { await db.execute("ALTER TABLE customers ADD COLUMN customer_code TEXT"); } catch (_) {}
         try { await db.execute("ALTER TABLE customers ADD COLUMN is_guest INTEGER DEFAULT 0"); } catch (_) {}
+        try { await db.execute("ALTER TABLE customers ADD COLUMN area_name TEXT"); } catch (_) {}
+        try { await db.execute("ALTER TABLE customers ADD COLUMN road_name TEXT"); } catch (_) {}
+        try { await db.execute("ALTER TABLE customers ADD COLUMN sub_road_name TEXT"); } catch (_) {}
         try { await db.execute("ALTER TABLE products ADD COLUMN order_now_stock REAL DEFAULT 0.0"); } catch (_) {}
         try { await db.execute("ALTER TABLE products ADD COLUMN order_now_price REAL DEFAULT 0.0"); } catch (_) {}
         try { await db.execute("ALTER TABLE products ADD COLUMN order_now_mrp REAL DEFAULT 0.0"); } catch (_) {}
         try { await db.execute("ALTER TABLE products ADD COLUMN order_now_cost_price REAL DEFAULT 0.0"); } catch (_) {}
         try { await db.execute("ALTER TABLE products ADD COLUMN order_now_is_available INTEGER DEFAULT 1"); } catch (_) {}
+        try { await db.execute("ALTER TABLE order_items ADD COLUMN total_price REAL DEFAULT 0.0"); } catch (_) {}
+        try {
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS customer_login_logs (
+              id TEXT PRIMARY KEY,
+              customer_id TEXT,
+              customer_code TEXT,
+              customer_name TEXT,
+              customer_phone TEXT,
+              login_method TEXT,
+              logged_in_at TEXT,
+              device_info TEXT,
+              app_version TEXT,
+              expires_at TEXT,
+              created_at TEXT
+            )
+          ''');
+        } catch (_) {}
       },
     );
   }
 
   Future<void> _onCreate(Database db, int version) async {
+    // Customer Login Logs Table
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS customer_login_logs (
+        id TEXT PRIMARY KEY,
+        customer_id TEXT,
+        customer_code TEXT,
+        customer_name TEXT,
+        customer_phone TEXT,
+        login_method TEXT,
+        logged_in_at TEXT,
+        device_info TEXT,
+        app_version TEXT,
+        expires_at TEXT,
+        created_at TEXT
+      )
+    ''');
+
     // Categories Table
     await db.execute('''
       CREATE TABLE categories (
+
         id TEXT PRIMARY KEY,
         name TEXT UNIQUE,
         is_enabled INTEGER DEFAULT 1,
@@ -92,6 +131,9 @@ class DatabaseHelper {
         area_id TEXT,
         road_id TEXT,
         sub_road_id TEXT,
+        area_name TEXT,
+        road_name TEXT,
+        sub_road_name TEXT,
         delivery_schedule TEXT,
         cutoff_time TEXT DEFAULT '23:59',
         created_at TEXT
@@ -136,6 +178,7 @@ class DatabaseHelper {
         quantity REAL,
         price REAL,
         unit TEXT,
+        total_price REAL,
         created_at TEXT,
         FOREIGN KEY (order_id) REFERENCES orders (id) ON DELETE CASCADE,
         FOREIGN KEY (product_id) REFERENCES products (id) ON DELETE SET NULL
@@ -242,6 +285,11 @@ class DatabaseHelper {
         ''');
       } catch (_) {}
     }
+    if (oldVersion < 9) {
+      try { await db.execute("ALTER TABLE customers ADD COLUMN area_name TEXT"); } catch (_) {}
+      try { await db.execute("ALTER TABLE customers ADD COLUMN road_name TEXT"); } catch (_) {}
+      try { await db.execute("ALTER TABLE customers ADD COLUMN sub_road_name TEXT"); } catch (_) {}
+    }
   }
 
   Future<void> clearOfflineOrders() async {
@@ -249,6 +297,16 @@ class DatabaseHelper {
       final db = await database;
       await db.delete('order_items');
       await db.delete('orders');
+    } catch (_) {}
+  }
+
+  Future<void> clearUserData() async {
+    try {
+      final db = await database;
+      await db.delete('customers');
+      await db.delete('orders');
+      await db.delete('order_items');
+      await db.delete('cache_metadata');
     } catch (_) {}
   }
 

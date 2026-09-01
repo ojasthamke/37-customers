@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Account Deletion Request - OrderKart</title>
+    <style>
+        :root {
+            --primary: #1B3624;
+            --emerald: #10B981;
+            --emerald-dark: #047857;
+            --danger: #DC2626;
+            --bg-page: #F7F5EE;
+            --bg-card: #FFFFFF;
+            --text-main: #1E293B;
+            --text-muted: #64748B;
+            --border: #E2E8F0;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background-color: var(--bg-page);
+            color: var(--text-main);
+            line-height: 1.6;
+            padding: 24px 16px;
+        }
+        .container {
+            max-width: 750px;
+            margin: 0 auto;
+            background: var(--bg-card);
+            padding: 40px 32px;
+            border-radius: 16px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.05);
+            border: 1px solid var(--border);
+        }
+        .header {
+            border-bottom: 2px solid var(--border);
+            padding-bottom: 20px;
+            margin-bottom: 28px;
+        }
+        .logo-title {
+            font-size: 26px;
+            font-weight: 800;
+            color: var(--primary);
+            margin-bottom: 6px;
+        }
+        .sub-title {
+            font-size: 13px;
+            color: var(--emerald-dark);
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .notice-danger {
+            background: #FEF2F2;
+            border-left: 4px solid var(--danger);
+            padding: 16px;
+            border-radius: 6px;
+            margin: 20px 0;
+            font-size: 14px;
+            color: #991B1B;
+        }
+        .notice-info {
+            background: #F0FDF4;
+            border-left: 4px solid var(--emerald);
+            padding: 16px;
+            border-radius: 6px;
+            margin: 20px 0;
+            font-size: 14px;
+            color: #166534;
+        }
+        h2 {
+            font-size: 18px;
+            color: var(--primary);
+            margin-top: 24px;
+            margin-bottom: 12px;
+            font-weight: 700;
+        }
+        p { margin-bottom: 14px; font-size: 14.5px; color: #334155; }
+        ul { margin-left: 20px; margin-bottom: 16px; }
+        li { margin-bottom: 8px; font-size: 14px; color: #475569; }
+        .form-card {
+            background: #F8FAFC;
+            border: 1px solid var(--border);
+            padding: 24px;
+            border-radius: 12px;
+            margin-top: 24px;
+        }
+        .form-group {
+            margin-bottom: 16px;
+        }
+        label {
+            display: block;
+            font-size: 13.5px;
+            font-weight: 600;
+            color: #334155;
+            margin-bottom: 6px;
+        }
+        input, textarea {
+            width: 100%;
+            padding: 10px 14px;
+            border: 1px solid #CBD5E1;
+            border-radius: 8px;
+            font-size: 14px;
+            outline: none;
+            background: #FFFFFF;
+        }
+        input:focus, textarea:focus {
+            border-color: var(--emerald);
+            box-shadow: 0 0 0 3px rgba(16,185,129,0.15);
+        }
+        .btn-submit {
+            background: var(--danger);
+            color: #FFFFFF;
+            font-weight: 700;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            width: 100%;
+            transition: background 0.2s;
+        }
+        .btn-submit:hover {
+            background: #B91C1C;
+        }
+        .footer {
+            margin-top: 40px;
+            border-top: 1px solid var(--border);
+            padding-top: 20px;
+            font-size: 13px;
+            color: var(--text-muted);
+            text-align: center;
+        }
+        a { color: var(--emerald-dark); text-decoration: none; font-weight: 600; }
+        a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="sub-title">OrderKart • User Data & Privacy Management</div>
+            <div class="logo-title">Request Account & Data Deletion</div>
+            <p style="font-size: 13px; color: var(--text-muted); margin-top: 4px;">
+                Published in compliance with Google Play Store User Data & Account Deletion Policy.
+            </p>
+        </div>
+
+        <div class="notice-danger">
+            <strong>Important Notice:</strong> Deleting your account will permanently remove your online mobile app login, session credentials, and push notification tokens from our cloud databases.
+        </div>
+
+        <h2>Method 1: In-App Instant Deletion (Fastest)</h2>
+        <p>If you currently have the OrderKart application installed on your Android device:</p>
+        <ul>
+            <li>Open the <strong>OrderKart</strong> app.</li>
+            <li>Tap on the <strong>My Profile</strong> tab in the bottom navigation bar.</li>
+            <li>Scroll down to the <strong>Information & Support</strong> section.</li>
+            <li>Tap <strong>Delete Account</strong> (highlighted in red) and confirm your choice.</li>
+            <li>Your online credentials will be purged immediately, and you will be signed out.</li>
+        </ul>
+
+        <h2>Method 2: Remote / Web Deletion Request (If App is Uninstalled)</h2>
+        <p>If you have uninstalled the app or cannot access your device, submit your registered customer details below or email us at <a href="mailto:supportorderkart@gmail.com">supportorderkart@gmail.com</a> with the subject <em>"Account Deletion Request"</em>.</p>
+
+        <div class="form-card">
+            <form onsubmit="handleDeletionSubmit(event)">
+                <div class="form-group">
+                    <label for="fullName">Full Name (as registered on OrderKart):</label>
+                    <input type="text" id="fullName" required placeholder="e.g., Rajesh Sharma">
+                </div>
+                <div class="form-group">
+                    <label for="phone">Registered Mobile Number (10 digits):</label>
+                    <input type="tel" id="phone" required placeholder="e.g., 9876543210">
+                </div>
+                <div class="form-group">
+                    <label for="memberCode">Customer Member Code (Optional):</label>
+                    <input type="text" id="memberCode" placeholder="e.g., MEM101">
+                </div>
+                <div class="form-group">
+                    <label for="reason">Reason for Deletion (Optional):</label>
+                    <textarea id="reason" rows="2" placeholder="Tell us why you wish to delete your account..."></textarea>
+                </div>
+                <button type="submit" class="btn-submit">Submit Account Deletion Request</button>
+            </form>
+        </div>
+
+        <h2>Data Deletion & Retention Policy</h2>
+        <div class="notice-info">
+            <strong>What Data is Permanently Purged:</strong>
+            <ul style="margin-top: 8px; margin-bottom: 0;">
+                <li>Online login credentials, password hashes, and security PINs.</li>
+                <li>Firebase Cloud Messaging (FCM) push notification tokens.</li>
+                <li>Active authentication session tokens.</li>
+            </ul>
+        </div>
+
+        <p><strong>Statutory Retention Exception:</strong> Under applicable Indian laws (including the Income Tax Act 1961, Goods & Services Tax (GST) Act 2017, and Commercial Record-keeping requirements), past completed transaction receipts, sales invoices, and customer ledger balances are legally retained in the store's offline administrative system for financial accounting and auditing purposes.</p>
+
+        <p><strong>Turnaround Time:</strong> Web/Email deletion requests are verified and processed within <strong>24 to 48 hours</strong>.</p>
+
+        <div class="footer">
+            <p>Need help? Contact our compliance support team via WhatsApp at <a href="https://wa.me/919021107009">+91 90211 07009</a> or email <a href="mailto:supportorderkart@gmail.com">supportorderkart@gmail.com</a>.</p>
+            <p style="margin-top: 8px;">&copy; 2026 OrderKart • <a href="privacy_policy.html">Privacy Policy</a></p>
+        </div>
+    </div>
+
+    <script>
+        function handleDeletionSubmit(e) {
+            e.preventDefault();
+            const name = document.getElementById('fullName').value;
+            const phone = document.getElementById('phone').value;
+            const code = document.getElementById('memberCode').value;
+            const reason = document.getElementById('reason').value;
+
+            const mailSubject = encodeURIComponent("OrderKart Account Deletion Request - " + phone);
+            const mailBody = encodeURIComponent(
+                "Dear OrderKart Support Team,\n\n" +
+                "I hereby request the permanent deletion of my online customer account and credentials.\n\n" +
+                "Customer Details:\n" +
+                "- Full Name: " + name + "\n" +
+                "- Registered Mobile: " + phone + "\n" +
+                "- Member Code: " + (code || "N/A") + "\n" +
+                "- Reason: " + (reason || "User requested deletion") + "\n\n" +
+                "Thank you."
+            );
+
+            window.location.href = "mailto:supportorderkart@gmail.com?subject=" + mailSubject + "&body=" + mailBody;
+        }
+    </script>
+</body>
+</html>
