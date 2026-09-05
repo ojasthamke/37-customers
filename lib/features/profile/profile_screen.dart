@@ -11,7 +11,6 @@ import 'legal/policy_detail_screen.dart';
 import '../../core/utils/string_utils.dart';
 import '../../core/widgets/ambient_background.dart';
 import '../../core/widgets/delivery_address_edit_sheet.dart';
-import '../../core/services/crash_observability_service.dart';
 
 class ProfileScreen extends ConsumerStatefulWidget {
   final bool showAppBar;
@@ -286,91 +285,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
               await ref.read(authProvider.notifier).logout();
             },
             child: const Text('Logout'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showDiagnosticsDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: bgCard,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: Colors.blue.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: const Icon(Icons.bug_report_outlined, color: Colors.blue, size: 24),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                'Crash Diagnostics',
-                style: GoogleFonts.playfairDisplay(
-                  fontWeight: FontWeight.bold,
-                  color: textColorPrimary,
-                  fontSize: 20,
-                ),
-              ),
-            ),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Firebase Crashlytics is actively monitoring this build for unexpected crashes, ANRs, and background errors.',
-              style: GoogleFonts.inter(fontSize: 13, color: textColorPrimary),
-            ),
-            const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: const Color(0xFFEFF6FF),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: const Color(0xFFBFDBFE)),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    '⚡ Test Crash Tool',
-                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFF1D4ED8)),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    'Pressing the button below intentionally throws a test crash to verify that your Firebase Console receives reports.',
-                    style: GoogleFonts.inter(fontSize: 12, color: const Color(0xFF1E40AF)),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Close', style: TextStyle(color: textColorSecondary, fontWeight: FontWeight.bold)),
-          ),
-          ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFFDC2626),
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            ),
-            icon: const Icon(Icons.warning_amber_rounded, size: 18),
-            label: const Text('Trigger Test Crash'),
-            onPressed: () {
-              Navigator.pop(context);
-              CrashObservabilityService.instance.testCrash();
-            },
           ),
         ],
       ),
@@ -754,14 +668,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   title: const Text('Contact Help & Support', style: TextStyle(fontWeight: FontWeight.bold, color: textColorPrimary)),
                   trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 14, color: textColorSecondary),
                   onTap: () => _showHelpBottomSheet(context, ref),
-                ),
-                const Divider(height: 1, indent: 56),
-                ListTile(
-                  leading: const Icon(Icons.bug_report_outlined, color: textColorPrimary),
-                  title: const Text('App Health & Diagnostics', style: TextStyle(fontWeight: FontWeight.bold, color: textColorPrimary)),
-                  subtitle: const Text('Firebase Crashlytics & Telemetry', style: TextStyle(fontSize: 11, color: textColorSecondary)),
-                  trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 14, color: textColorSecondary),
-                  onTap: () => _showDiagnosticsDialog(context),
                 ),
                 const Divider(height: 1, indent: 56),
                 ListTile(
