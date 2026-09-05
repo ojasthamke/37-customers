@@ -5,6 +5,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'catalog_provider.dart';
 import 'product_details_screen.dart';
 import '../../core/widgets/quantity_selector.dart';
+import '../../core/widgets/skeleton_loader.dart';
 import '../../core/utils/string_utils.dart';
 import '../../core/widgets/glass_container.dart';
 import '../../core/widgets/ambient_background.dart';
@@ -360,6 +361,14 @@ Widget _buildProductCard(BuildContext context, Map<String, dynamic> p, ThemeData
                       fit: BoxFit.cover,
                       cacheWidth: 360,
                       cacheHeight: 300,
+                      loadingBuilder: (context, child, loadingProgress) {
+                        if (loadingProgress == null) return child;
+                        return const SkeletonLoader.rectangle(
+                          height: double.infinity,
+                          width: double.infinity,
+                          borderRadius: 12,
+                        );
+                      },
                       errorBuilder: (context, error, stackTrace) {
                         return Icon(
                           Icons.shopping_basket_rounded,
@@ -470,30 +479,34 @@ Widget _buildProductCard(BuildContext context, Map<String, dynamic> p, ThemeData
         const SizedBox(height: 12),
         
         // Price & MRP
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.baseline,
-          textBaseline: TextBaseline.alphabetic,
-          children: [
-            Text(
-              '₹${_formatCurrency(price)}',
-              style: TextStyle(
-                fontWeight: FontWeight.bold,
-                fontSize: 17,
-                color: isAvailable ? const Color(0xFF1B3624) : Colors.grey,
-              ),
-            ),
-            if (mrp > price && price > 0) ...[
-              const SizedBox(width: 6),
+        FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
               Text(
-                '₹${_formatCurrency(mrp)}',
+                '₹${_formatCurrency(price)}',
                 style: TextStyle(
-                  decoration: TextDecoration.lineThrough,
-                  color: Colors.grey[400],
-                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 17,
+                  color: isAvailable ? const Color(0xFF1B3624) : Colors.grey,
                 ),
               ),
+              if (mrp > price && price > 0) ...[
+                const SizedBox(width: 6),
+                Text(
+                  '₹${_formatCurrency(mrp)}',
+                  style: TextStyle(
+                    decoration: TextDecoration.lineThrough,
+                    color: Colors.grey[400],
+                    fontSize: 12,
+                  ),
+                ),
+              ],
             ],
-          ],
+          ),
         ),
         
         const SizedBox(height: 12),

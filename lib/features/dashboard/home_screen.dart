@@ -28,26 +28,6 @@ import 'schedule_banner.dart';
 final activeTabProvider = StateProvider<int>((ref) => 0);
 final cartOriginTabProvider = StateProvider<int>((ref) => 0);
 
-final lastOrderProvider = FutureProvider<Map<String, dynamic>?>((ref) async {
-  try {
-    final client = Supabase.instance.client;
-    final userId = client.auth.currentUser?.id;
-    if (userId == null) return null;
-    
-    final res = await client
-        .from('orders')
-        .select('*, order_items(*)')
-        .eq('customer_id', userId)
-        .order('order_date', ascending: false)
-        .limit(1)
-        .maybeSingle();
-        
-    return res;
-  } catch (_) {
-    return null;
-  }
-});
-
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
 
@@ -793,19 +773,23 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 ],
               ),
               if (isSelected) ...[
-                const SizedBox(width: 6),
+                const SizedBox(width: 4),
                 Flexible(
-                  child: Text(
-                    label,
-                    style: GoogleFonts.outfit(
-                      color: Colors.white,
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 0.2,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      label,
+                      style: GoogleFonts.outfit(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 0.2,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.fade,
+                      softWrap: false,
                     ),
-                    maxLines: 1,
-                    overflow: TextOverflow.fade,
-                    softWrap: false,
                   ),
                 ),
               ],
@@ -1359,11 +1343,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               error: (_, __) => const SizedBox.shrink(),
             ),
 
-            // "Buy Again" Quick Horizontal Ribbon (Feature 15)
-            _buildBuyAgainSection(context, ref),
-
-
-
             categoriesAsync.when(
               data: (categories) {
                 if (categories.isEmpty) return const SizedBox.shrink();
@@ -1826,14 +1805,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   ),
                 ),
                 const SizedBox(height: 4),
-                Text(
-                  steps[stepIndex],
-                  style: GoogleFonts.inter(
-                    fontSize: 9.5,
-                    fontWeight: isCurrent ? FontWeight.bold : (isCompleted ? FontWeight.w600 : FontWeight.normal),
-                    color: isCurrent
-                        ? const Color(0xFF1B3624)
-                        : (isCompleted ? const Color(0xFF2E6F40) : const Color(0xFF94A3B8)),
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    steps[stepIndex],
+                    style: GoogleFonts.inter(
+                      fontSize: 9.5,
+                      fontWeight: isCurrent ? FontWeight.bold : (isCompleted ? FontWeight.w600 : FontWeight.normal),
+                      color: isCurrent
+                          ? const Color(0xFF1B3624)
+                          : (isCompleted ? const Color(0xFF2E6F40) : const Color(0xFF94A3B8)),
+                    ),
                   ),
                 ),
               ],
@@ -1872,179 +1854,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           ],
         );
       },
-    );
-  }
-
-  Widget _buildBuyAgainSection(BuildContext context, WidgetRef ref) {
-    final lastOrderAsync = ref.watch(lastOrderProvider);
-    return lastOrderAsync.maybeWhen(
-      data: (lastOrder) {
-        if (lastOrder == null) return const SizedBox.shrink();
-        final items = lastOrder['order_items'] as List<dynamic>? ?? [];
-        if (items.isEmpty) return const SizedBox.shrink();
-
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SizedBox(height: 14),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(5),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFD4AF37).withValues(alpha: 0.15),
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(Icons.history_rounded, size: 16, color: Color(0xFFB45309)),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      'Buy Again',
-                      style: GoogleFonts.outfit(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 18,
-                        color: textColorPrimary,
-                      ),
-                    ),
-                  ],
-                ),
-                TextButton(
-                  style: TextButton.styleFrom(
-                    padding: EdgeInsets.zero,
-                    minimumSize: Size.zero,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                  onPressed: () => _handleReorderTap(context, ref, lastOrder),
-                  child: Text(
-                    'Reorder All →',
-                    style: GoogleFonts.inter(
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                      color: const Color(0xFF2E6F40),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            SizedBox(
-              height: 142,
-              child: ListView.builder(
-                scrollDirection: Axis.horizontal,
-                physics: const BouncingScrollPhysics(),
-                itemCount: items.length,
-                itemBuilder: (context, index) {
-                  final item = items[index];
-                  final name = item['product_name'] ?? item['name'] ?? 'Product';
-                  final pid = item['product_id']?.toString() ?? '';
-                  final double price = (item['price'] is num)
-                      ? (item['price'] as num).toDouble()
-                      : (double.tryParse(item['price']?.toString() ?? '') ?? 0.0);
-                  final unit = item['unit']?.toString() ?? 'kg';
-                  final rawImg = item['image_path'] as String? ?? item['image_url'] as String?;
-                  final imageUrl = getProductImage(name, rawImg);
-
-                  return Container(
-                    width: 116,
-                    margin: const EdgeInsets.only(right: 12),
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: const Color(0xFFE2E8F0)),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.03),
-                          blurRadius: 8,
-                          offset: const Offset(0, 2),
-                        ),
-                      ],
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(10),
-                          child: Image.network(
-                            imageUrl,
-                            height: 58,
-                            width: double.infinity,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) => Container(
-                              height: 58,
-                              color: const Color(0xFFE8F5E9),
-                              child: const Icon(Icons.eco_rounded, color: Color(0xFF2E6F40), size: 24),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: GoogleFonts.inter(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 11.5,
-                            color: textColorPrimary,
-                          ),
-                        ),
-                        const Spacer(),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              '₹${_formatCurrency(price)}',
-                              style: GoogleFonts.outfit(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13,
-                                color: textColorPrimary,
-                              ),
-                            ),
-                            GestureDetector(
-                              onTap: () {
-                                HapticFeedback.lightImpact();
-                                ref.read(cartProvider.notifier).addItem(
-                                  productId: pid,
-                                  productName: name,
-                                  price: price,
-                                  unit: unit,
-                                  quantity: 1.0,
-                                  imagePath: rawImg,
-                                );
-                                ScaffoldMessenger.of(context).hideCurrentSnackBar();
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text('Added $name to cart!'),
-                                    backgroundColor: const Color(0xFF1B3624),
-                                    duration: const Duration(seconds: 1),
-                                  ),
-                                );
-                              },
-                              child: Container(
-                                padding: const EdgeInsets.all(4),
-                                decoration: const BoxDecoration(
-                                  color: Color(0xFF1B3624),
-                                  shape: BoxShape.circle,
-                                ),
-                                child: const Icon(Icons.add_rounded, color: Colors.white, size: 14),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              ),
-            ),
-            const SizedBox(height: 12),
-          ],
-        );
-      },
-      orElse: () => const SizedBox.shrink(),
     );
   }
 
@@ -2568,83 +2377,95 @@ class PopularProductCard extends ConsumerWidget {
                 const SizedBox(height: 10),
                 // Price & MRP Layout (Feature 19)
                 if (unit.toLowerCase().contains('kg')) ...[
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.baseline,
-                    textBaseline: TextBaseline.alphabetic,
-                    children: [
-                      Text(
-                        '₹${_formatCurrency(price / 4)}/250g',
-                        style: GoogleFonts.outfit(
-                          color: const Color(0xFF1B3624),
-                          fontWeight: FontWeight.w800,
-                          fontSize: 20,
-                        ),
-                      ),
-                      if (marketPrice > price) ...[
-                        const SizedBox(width: 8),
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
                         Text(
-                          '₹${_formatCurrency(marketPrice / 4)}',
-                          style: GoogleFonts.inter(
-                            color: Colors.grey[600],
-                            fontWeight: FontWeight.w600,
-                            fontSize: 13,
-                            decoration: TextDecoration.lineThrough,
+                          '₹${_formatCurrency(price / 4)}/250g',
+                          style: GoogleFonts.outfit(
+                            color: const Color(0xFF1B3624),
+                            fontWeight: FontWeight.w800,
+                            fontSize: 20,
                           ),
                         ),
+                        if (marketPrice > price) ...[
+                          const SizedBox(width: 8),
+                          Text(
+                            '₹${_formatCurrency(marketPrice / 4)}',
+                            style: GoogleFonts.inter(
+                              color: Colors.grey[600],
+                              fontWeight: FontWeight.w600,
+                              fontSize: 13,
+                              decoration: TextDecoration.lineThrough,
+                            ),
+                          ),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
                   const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Text(
-                        '₹${_formatCurrency(price)} per kg',
-                        style: GoogleFonts.inter(
-                          color: const Color(0xFF2E6F40),
-                          fontWeight: FontWeight.w600,
-                          fontSize: 13,
-                        ),
-                      ),
-                      if (marketPrice > price) ...[
-                        const SizedBox(width: 8),
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Row(
+                      children: [
                         Text(
-                          '₹${_formatCurrency(marketPrice)}',
+                          '₹${_formatCurrency(price)} per kg',
                           style: GoogleFonts.inter(
-                            color: Colors.grey[600],
+                            color: const Color(0xFF2E6F40),
                             fontWeight: FontWeight.w600,
                             fontSize: 13,
-                            decoration: TextDecoration.lineThrough,
                           ),
                         ),
+                        if (marketPrice > price) ...[
+                          const SizedBox(width: 8),
+                          Text(
+                            '₹${_formatCurrency(marketPrice)}',
+                            style: GoogleFonts.inter(
+                              color: Colors.grey[600],
+                              fontWeight: FontWeight.w600,
+                              fontSize: 13,
+                              decoration: TextDecoration.lineThrough,
+                            ),
+                          ),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
                 ] else ...[
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.baseline,
-                    textBaseline: TextBaseline.alphabetic,
-                    children: [
-                      Text(
-                        '₹${_formatCurrency(price)}/$unit',
-                        style: GoogleFonts.outfit(
-                          color: const Color(0xFF1B3624),
-                          fontWeight: FontWeight.w800,
-                          fontSize: 20,
-                        ),
-                      ),
-                      if (marketPrice > price) ...[
-                        const SizedBox(width: 8),
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
                         Text(
-                          '₹${_formatCurrency(marketPrice)}',
-                          style: GoogleFonts.inter(
-                            color: Colors.grey[600],
-                            fontWeight: FontWeight.w600,
-                            fontSize: 13,
-                            decoration: TextDecoration.lineThrough,
+                          '₹${_formatCurrency(price)}/$unit',
+                          style: GoogleFonts.outfit(
+                            color: const Color(0xFF1B3624),
+                            fontWeight: FontWeight.w800,
+                            fontSize: 20,
                           ),
                         ),
+                        if (marketPrice > price) ...[
+                          const SizedBox(width: 8),
+                          Text(
+                            '₹${_formatCurrency(marketPrice)}',
+                            style: GoogleFonts.inter(
+                              color: Colors.grey[600],
+                              fontWeight: FontWeight.w600,
+                              fontSize: 13,
+                              decoration: TextDecoration.lineThrough,
+                            ),
+                          ),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
                 ],
               ],
@@ -2691,29 +2512,13 @@ class PopularProductCard extends ConsumerWidget {
                             );
                           },
                           errorBuilder: (context, error, stackTrace) {
-                            return Image.network(
-                              _getProductImage(name),
+                            return Container(
                               height: 100,
                               width: 120,
-                              cacheWidth: 360,
-                              cacheHeight: 300,
-                              fit: BoxFit.cover,
-                              loadingBuilder: (context, child, loadingProgress) {
-                                if (loadingProgress == null) return child;
-                                return const SkeletonLoader.rectangle(
-                                  height: 100,
-                                  width: 120,
-                                  borderRadius: 16,
-                                );
-                              },
-                              errorBuilder: (context, error, stackTrace) {
-                                return Container(
-                                  height: 100,
-                                  width: 120,
-                                  color: const Color(0xFFE8F5E9),
-                                  child: const Icon(Icons.eco_rounded, color: Color(0xFF2E6F40), size: 36),
-                                );
-                              },
+                              color: const Color(0xFFE8F5E9),
+                              child: const Center(
+                                child: Icon(Icons.eco_rounded, color: Color(0xFF2E6F40), size: 36),
+                              ),
                             );
                           },
                         ),
@@ -2914,8 +2719,8 @@ class _MicroAnimatedAddButtonState extends State<_MicroAnimatedAddButton> {
         duration: const Duration(milliseconds: 120),
         curve: Curves.easeOutCubic,
         child: Container(
-          height: 36,
-          padding: const EdgeInsets.symmetric(horizontal: 14),
+          constraints: const BoxConstraints(minHeight: 36),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
           decoration: BoxDecoration(
             color: const Color(0xFF1B3624),
             borderRadius: BorderRadius.circular(18),
@@ -2933,12 +2738,15 @@ class _MicroAnimatedAddButtonState extends State<_MicroAnimatedAddButton> {
             children: [
               const Icon(Icons.add_rounded, color: Colors.white, size: 14),
               const SizedBox(width: 4),
-              Text(
-                widget.label,
-                style: GoogleFonts.inter(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 12,
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  widget.label,
+                  style: GoogleFonts.inter(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                  ),
                 ),
               ),
             ],
@@ -2962,38 +2770,6 @@ List<String> _getProductTags(String productName) {
   if (n.contains('coriander') || n.contains('dhania')) return ['Herb', 'Local'];
   if (n.contains('ginger') || n.contains('adrak')) return ['Organic', 'Spicy'];
   return ['Organic', 'Fresh'];
-}
-
-String _getProductImage(String productName) {
-  final n = productName.toLowerCase();
-  if (n.contains('potato')) {
-    return 'https://images.unsplash.com/photo-1518977676601-b53f82aba655?auto=format&fit=crop&w=600&q=80';
-  }
-  if (n.contains('tomato')) {
-    return 'https://images.unsplash.com/photo-1595855759920-86582396756a?auto=format&fit=crop&w=600&q=80';
-  }
-  if (n.contains('onion')) {
-    return 'https://images.unsplash.com/photo-1508747703725-719777637510?auto=format&fit=crop&w=600&q=80';
-  }
-  if (n.contains('apple')) {
-    return 'https://images.unsplash.com/photo-1560806887-1e4cd0b6cbd6?auto=format&fit=crop&w=600&q=80';
-  }
-  if (n.contains('banana')) {
-    return 'https://images.unsplash.com/photo-1571771894821-ce9b6c11b08e?auto=format&fit=crop&w=600&q=80';
-  }
-  if (n.contains('coriander') || n.contains('dhania')) {
-    return 'https://images.unsplash.com/photo-1588879460618-9249e7d947d1?auto=format&fit=crop&w=600&q=80';
-  }
-  if (n.contains('ginger') || n.contains('adrak')) {
-    return 'https://images.unsplash.com/photo-1599940824399-b87987ceb72a?auto=format&fit=crop&w=600&q=80';
-  }
-  if (n.contains('milk')) {
-    return 'https://images.unsplash.com/photo-1550583724-b2692b85b150?auto=format&fit=crop&w=600&q=80';
-  }
-  if (n.contains('paneer')) {
-    return 'https://images.unsplash.com/photo-1631452180519-c014fe946bc7?auto=format&fit=crop&w=600&q=80';
-  }
-  return 'https://images.unsplash.com/photo-1610397613050-59f7f1554d67?auto=format&fit=crop&w=600&q=80';
 }
 
 String _formatSelectorQuantity(double qty, String unit) {

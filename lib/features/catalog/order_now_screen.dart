@@ -463,83 +463,95 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
                                     const SizedBox(height: 10),
                                     // Price & MRP Layout
                                     if (unit.toLowerCase().contains('kg')) ...[
-                                      Row(
-                                        crossAxisAlignment: CrossAxisAlignment.baseline,
-                                        textBaseline: TextBaseline.alphabetic,
-                                        children: [
-                                          Text(
-                                            '₹${(price / 4).toStringAsFixed(0)}/250g',
-                                            style: GoogleFonts.outfit(
-                                              color: const Color(0xFF1B3624),
-                                              fontWeight: FontWeight.bold,
-                                              fontSize: 21,
-                                            ),
-                                          ),
-                                          if (p['market_price'] != null &&
-                                              (p['market_price'] as num).toDouble() > price) ...[
-                                            const SizedBox(width: 8),
-                                            AnimatedSlashedText(
-                                              text: '₹${((p['market_price'] as num).toDouble() / 4).toStringAsFixed(0)}',
-                                              style: GoogleFonts.inter(
-                                                color: Colors.grey[600],
+                                      FittedBox(
+                                        fit: BoxFit.scaleDown,
+                                        alignment: Alignment.centerLeft,
+                                        child: Row(
+                                          crossAxisAlignment: CrossAxisAlignment.baseline,
+                                          textBaseline: TextBaseline.alphabetic,
+                                          children: [
+                                            Text(
+                                              '₹${(price / 4).toStringAsFixed(0)}/250g',
+                                              style: GoogleFonts.outfit(
+                                                color: const Color(0xFF1B3624),
                                                 fontWeight: FontWeight.bold,
-                                                fontSize: 13,
+                                                fontSize: 21,
                                               ),
                                             ),
+                                            if (p['market_price'] != null &&
+                                                (p['market_price'] as num).toDouble() > price) ...[
+                                              const SizedBox(width: 8),
+                                              AnimatedSlashedText(
+                                                text: '₹${((p['market_price'] as num).toDouble() / 4).toStringAsFixed(0)}',
+                                                style: GoogleFonts.inter(
+                                                  color: Colors.grey[600],
+                                                  fontWeight: FontWeight.bold,
+                                                  fontSize: 13,
+                                                ),
+                                              ),
+                                            ],
                                           ],
-                                        ],
+                                        ),
                                       ),
                                       const SizedBox(height: 4),
-                                      Row(
-                                        children: [
-                                          Text(
-                                            '₹${price.toStringAsFixed(0)} per kg',
-                                            style: GoogleFonts.inter(
-                                              color: const Color(0xFF2E6F40),
-                                              fontWeight: FontWeight.w600,
-                                              fontSize: 13,
-                                            ),
-                                          ),
-                                          if (p['market_price'] != null &&
-                                              (p['market_price'] as num).toDouble() > price) ...[
-                                            const SizedBox(width: 8),
-                                            AnimatedSlashedText(
-                                              text: '₹${(p['market_price'] as num).toDouble().toStringAsFixed(0)}',
+                                      FittedBox(
+                                        fit: BoxFit.scaleDown,
+                                        alignment: Alignment.centerLeft,
+                                        child: Row(
+                                          children: [
+                                            Text(
+                                              '₹${price.toStringAsFixed(0)} per kg',
                                               style: GoogleFonts.inter(
-                                                color: Colors.grey[600],
-                                                fontWeight: FontWeight.bold,
+                                                color: const Color(0xFF2E6F40),
+                                                fontWeight: FontWeight.w600,
                                                 fontSize: 13,
                                               ),
                                             ),
+                                            if (p['market_price'] != null &&
+                                                (p['market_price'] as num).toDouble() > price) ...[
+                                              const SizedBox(width: 8),
+                                              AnimatedSlashedText(
+                                                text: '₹${(p['market_price'] as num).toDouble().toStringAsFixed(0)}',
+                                                style: GoogleFonts.inter(
+                                                  color: Colors.grey[600],
+                                                  fontWeight: FontWeight.bold,
+                                                  fontSize: 13,
+                                                ),
+                                              ),
+                                            ],
                                           ],
-                                        ],
+                                        ),
                                       ),
                                     ] else ...[
-                                      Row(
-                                        crossAxisAlignment: CrossAxisAlignment.baseline,
-                                        textBaseline: TextBaseline.alphabetic,
-                                        children: [
-                                          Text(
-                                            '₹${price.toStringAsFixed(0)}/$unit',
-                                            style: GoogleFonts.outfit(
-                                              color: const Color(0xFF1B3624),
-                                              fontWeight: FontWeight.bold,
-                                              fontSize: 21,
-                                            ),
-                                          ),
-                                          if (p['market_price'] != null &&
-                                              (p['market_price'] as num).toDouble() > price) ...[
-                                            const SizedBox(width: 8),
-                                            AnimatedSlashedText(
-                                              text: '₹${(p['market_price'] as num).toDouble().toStringAsFixed(0)}',
-                                              style: GoogleFonts.inter(
-                                                color: Colors.grey[600],
+                                      FittedBox(
+                                        fit: BoxFit.scaleDown,
+                                        alignment: Alignment.centerLeft,
+                                        child: Row(
+                                          crossAxisAlignment: CrossAxisAlignment.baseline,
+                                          textBaseline: TextBaseline.alphabetic,
+                                          children: [
+                                            Text(
+                                              '₹${price.toStringAsFixed(0)}/$unit',
+                                              style: GoogleFonts.outfit(
+                                                color: const Color(0xFF1B3624),
                                                 fontWeight: FontWeight.bold,
-                                                fontSize: 13,
+                                                fontSize: 21,
                                               ),
                                             ),
+                                            if (p['market_price'] != null &&
+                                                (p['market_price'] as num).toDouble() > price) ...[
+                                              const SizedBox(width: 8),
+                                              AnimatedSlashedText(
+                                                text: '₹${(p['market_price'] as num).toDouble().toStringAsFixed(0)}',
+                                                style: GoogleFonts.inter(
+                                                  color: Colors.grey[600],
+                                                  fontWeight: FontWeight.bold,
+                                                  fontSize: 13,
+                                                ),
+                                              ),
+                                            ],
                                           ],
-                                        ],
+                                        ),
                                       ),
                                     ],
                                   ],
@@ -567,23 +579,20 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
                                             cacheWidth: 360,
                                             cacheHeight: 300,
                                             fit: BoxFit.cover,
-                                            errorBuilder: (context, error, stackTrace) {
-                                              return Image.network(
-                                                _getProductImage(name),
+                                            loadingBuilder: (context, child, loadingProgress) {
+                                              if (loadingProgress == null) return child;
+                                              return const SkeletonLoader.rectangle(
                                                 height: 100,
                                                 width: 120,
-                                                cacheWidth: 360,
-                                                cacheHeight: 300,
-                                                fit: BoxFit.cover,
-                                                errorBuilder: (context, error, stackTrace) {
-
-                                                  return Container(
-                                                    height: 100,
-                                                    width: 120,
-                                                    color: const Color(0xFFE8F5E9),
-                                                    child: const Icon(Icons.eco_rounded, color: Color(0xFF2E6F40), size: 36),
-                                                  );
-                                                },
+                                                borderRadius: 16,
+                                              );
+                                            },
+                                            errorBuilder: (context, error, stackTrace) {
+                                              return Container(
+                                                height: 100,
+                                                width: 120,
+                                                color: const Color(0xFFE8F5E9),
+                                                child: const Icon(Icons.eco_rounded, color: Color(0xFF2E6F40), size: 36),
                                               );
                                             },
                                           ),

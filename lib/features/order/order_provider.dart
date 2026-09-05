@@ -555,3 +555,29 @@ final orderDetailsProvider = StreamProvider.autoDispose.family<OrderFullDetails,
 
   return controller.stream;
 });
+
+final lastOrderProvider = FutureProvider<Map<String, dynamic>?>((ref) async {
+  try {
+    final client = Supabase.instance.client;
+    final currentCust = ref.watch(authProvider).customer;
+    final userId = currentCust?['id']?.toString() ?? client.auth.currentUser?.id;
+    final phone = currentCust?['phone']?.toString();
+    if ((userId == null || userId.isEmpty) && (phone == null || phone.isEmpty)) {
+      return null;
+    }
+
+    var query = client.from('orders').select('*, order_items(*)');
+    if (userId != null && userId.isNotEmpty && phone != null && phone.isNotEmpty) {
+      query = query.or('customer_id.eq.$userId,customer_phone.eq.$phone');
+    } else if (userId != null && userId.isNotEmpty) {
+      query = query.eq('customer_id', userId);
+    } else {
+      query = query.eq('customer_phone', phone!);
+    }
+
+    final res = await query.order('order_date', ascending: false).limit(1).maybeSingle();
+    return res;
+  } catch (_) {
+    return null;
+  }
+});
