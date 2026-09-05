@@ -1,10 +1,10 @@
-// Deno Edge Function: send-push
-// Place in supabase/functions/send-push/index.ts and deploy using: supabase functions deploy send-push
-
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
 interface PushPayload {
   token?: string;
+  tokens?: string[];
+  userId?: string;
+  targetRole?: "customer" | "admin";
   topic?: string;
   title: string;
   body: string;
@@ -12,46 +12,12 @@ interface PushPayload {
   channelId?: string;
 }
 
-// Google OAuth2 Token Response Interface
 interface TokenResponse {
   access_token: string;
   expires_in: number;
 }
 
-// Helper to get Google OAuth2 access token using Firebase Service Account
-async function getAccessToken(serviceAccount: any): Promise<string> {
-  const jwtHeader = b64Encode(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-  
-  const now = Math.floor(Date.now() / 1000);
-  const jwtClaim = b64Encode(JSON.stringify({
-    iss: serviceAccount.client_email,
-    scope: "https://www.googleapis.com/auth/firebase.messaging",
-    aud: "https://oauth2.googleapis.com/token",
-    exp: now + 3600,
-    iat: now
-  }));
-
-  const signInput = `${jwtHeader}.${jwtClaim}`;
-  const signedJwt = await signRS256(signInput, serviceAccount.private_key);
-
-  const response = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded"
-    },
-    body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${signedJwt}`
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to fetch access token: ${await response.text()}`);
-  }
-
-  const data: TokenResponse = await response.json();
-  return data.access_token;
-}
-
-// Base64 encoding helper
-function b64Encode(str: string): string {
+function b64UrlEncode(str: string): string {
   const bytes = new TextEncoder().encode(str);
   let binary = "";
   for (let i = 0; i < bytes.byteLength; i++) {
@@ -63,9 +29,18 @@ function b64Encode(str: string): string {
     .replace(/\//g, "_");
 }
 
-// RS256 signing using Deno WebCrypto API
+function uint8ArrayToB64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary)
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
 async function signRS256(input: string, privateKeyPem: string): Promise<string> {
-  // Extract key base64 from PEM
   const rawKeyB64 = privateKeyPem
     .replace(/-----BEGIN PRIVATE KEY-----/, "")
     .replace(/-----END PRIVATE KEY-----/, "")
@@ -94,16 +69,43 @@ async function signRS256(input: string, privateKeyPem: string): Promise<string> 
     new TextEncoder().encode(input)
   );
 
-  const sigBytes = new Uint8Array(signature);
-  let binarySig = "";
-  for (let i = 0; i < sigBytes.byteLength; i++) {
-    binarySig += String.fromCharCode(sigBytes[i]);
+  return uint8ArrayToB64Url(new Uint8Array(signature));
+}
+
+async function getAccessToken(serviceAccount: any): Promise<string> {
+  const jwtHeader = b64UrlEncode(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const now = Math.floor(Date.now() / 1000);
+  const jwtClaim = b64UrlEncode(JSON.stringify({
+    iss: serviceAccount.client_email,
+    scope: "https://www.googleapis.com/auth/firebase.messaging",
+    aud: "https://oauth2.googleapis.com/token",
+    exp: now + 3600,
+    iat: now
+  }));
+
+  const signInput = `${jwtHeader}.${jwtClaim}`;
+  const signature = await signRS256(signInput, serviceAccount.private_key);
+  const jwtAssertion = `${signInput}.${signature}`;
+
+  const bodyParams = new URLSearchParams({
+    grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+    assertion: jwtAssertion
+  });
+
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: bodyParams.toString()
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch access token: ${await response.text()}`);
   }
-  
-  return btoa(binarySig)
-    .replace(/=/g, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
+
+  const data: TokenResponse = await response.json();
+  return data.access_token;
 }
 
 serve(async (req) => {
@@ -118,23 +120,14 @@ serve(async (req) => {
   }
 
   try {
-    // 1. Verify authorization webhook token from environment secret
     const expectedSecret = Deno.env.get("PUSH_WEBHOOK_SECRET");
-    if (!expectedSecret) {
-      console.error("Missing PUSH_WEBHOOK_SECRET environment variable.");
-      return new Response(JSON.stringify({ error: "Server configuration error: missing PUSH_WEBHOOK_SECRET" }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-
     const customHeader = req.headers.get("x-webhook-secret");
     const authHeader = req.headers.get("Authorization");
     const apikeyHeader = req.headers.get("apikey");
 
     const isAuthorized = 
-      (customHeader && customHeader === expectedSecret) ||
-      (authHeader && (authHeader === `Bearer ${expectedSecret}` || authHeader === expectedSecret)) ||
+      (customHeader && expectedSecret && customHeader === expectedSecret) ||
+      (authHeader && expectedSecret && (authHeader === `Bearer ${expectedSecret}` || authHeader === expectedSecret)) ||
       (apikeyHeader && apikeyHeader.length > 10) ||
       (authHeader && (authHeader.startsWith("Bearer eyJ") || authHeader.startsWith("Bearer sb_")));
 
@@ -146,24 +139,24 @@ serve(async (req) => {
     }
 
     const payload: PushPayload = await req.json();
-    
-    // Retrieve Firebase Service Account JSON from secret environment variables
+
     const serviceAccountJson = Deno.env.get("FIREBASE_SERVICE_ACCOUNT");
     if (!serviceAccountJson) {
       throw new Error("Missing FIREBASE_SERVICE_ACCOUNT environment variable.");
     }
     const serviceAccount = JSON.parse(serviceAccountJson);
 
-    // Fetch OAuth2 access token
     const accessToken = await getAccessToken(serviceAccount);
-
-    // Call Firebase Cloud Messaging v1 Send API
     const projectId = serviceAccount.project_id;
     const fcmUrl = `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`;
 
-    const channelId = payload.channelId ?? "aplibhaji_customer_channel";
+    const channelId = payload.channelId ?? 
+      (payload.targetRole === "admin" ? "orderkart_channel" : "aplibhaji_customer_channel");
 
-    async function sendFcmMessage(targetObj: { token?: string; topic?: string }) {
+    const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "https://xsqaxvbrjvhgemlfgoxn.supabase.co";
+    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+
+    async function sendToFcmTarget(targetObj: { token?: string; topic?: string }) {
       const targetKey = targetObj.token ? "token" : "topic";
       const targetValue = targetObj.token ?? targetObj.topic ?? "all_customers";
 
@@ -222,42 +215,106 @@ serve(async (req) => {
         body: JSON.stringify(fcmMessage)
       });
 
+      if (!res.ok) {
+        const errText = await res.text();
+        console.warn(`FCM send notice for ${targetValue}:`, res.status, errText);
+
+        if (targetObj.token && serviceKey && (errText.includes("UNREGISTERED") || errText.includes("INVALID_ARGUMENT"))) {
+          try {
+            await fetch(`${supabaseUrl}/rest/v1/device_tokens?token=eq.${encodeURIComponent(targetObj.token)}`, {
+              method: "DELETE",
+              headers: {
+                "apikey": serviceKey,
+                "Authorization": `Bearer ${serviceKey}`
+              }
+            });
+          } catch (_) {}
+        }
+      }
+
       return res;
     }
 
-    // 1. Send to target token if specified
-    if (payload.token) {
-      const response = await sendFcmMessage({ token: payload.token });
-      if (!response.ok) {
-        throw new Error(`FCM API error: ${response.status} - ${await response.text()}`);
-      }
-    } else {
-      // 2. Broadcast mode: Send to topic 'all_customers'
-      await sendFcmMessage({ topic: payload.topic ?? "all_customers" });
+    const tokensToSend: Set<string> = new Set();
 
-      // And also fetch all customer tokens from Supabase DB to guarantee direct delivery to all registered devices
+    if (payload.token && payload.token.trim().length > 0) {
+      tokensToSend.add(payload.token.trim());
+    }
+    if (payload.tokens && Array.isArray(payload.tokens)) {
+      payload.tokens.forEach(t => { if (t && t.trim().length > 0) tokensToSend.add(t.trim()); });
+    }
+
+    if (payload.targetRole && serviceKey) {
       try {
-        const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "https://xsqaxvbrjvhgemlfgoxn.supabase.co";
-        const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? apikeyHeader ?? "";
-        if (serviceKey) {
-          const custRes = await fetch(`${supabaseUrl}/rest/v1/customers?select=fcm_token&fcm_token=not.is.null`, {
+        const dtRes = await fetch(`${supabaseUrl}/rest/v1/device_tokens?select=token,user_id,updated_at&role=eq.${payload.targetRole}&order=updated_at.desc`, {
+          headers: {
+            "apikey": serviceKey,
+            "Authorization": `Bearer ${serviceKey}`
+          }
+        });
+        if (dtRes.ok) {
+          const list: Array<{ token: string; user_id: string; updated_at?: string }> = await dtRes.json();
+          const seenAdminUsers = new Set<string>();
+          for (const r of list) {
+            if (r.token && r.user_id && !seenAdminUsers.has(r.user_id)) {
+              seenAdminUsers.add(r.user_id);
+              tokensToSend.add(r.token.trim());
+            } else if (r.token && !r.user_id) {
+              tokensToSend.add(r.token.trim());
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("Error fetching role device tokens:", err);
+      }
+    }
+
+    // Only resolve userId if no direct token was supplied
+    if (tokensToSend.size === 0 && payload.userId && serviceKey) {
+      try {
+        // 1. Check device_tokens table for the latest registered token
+        const dtRes = await fetch(`${supabaseUrl}/rest/v1/device_tokens?select=token,updated_at&user_id=eq.${payload.userId}&order=updated_at.desc&limit=1`, {
+          headers: {
+            "apikey": serviceKey,
+            "Authorization": `Bearer ${serviceKey}`
+          }
+        });
+        let foundToken = false;
+        if (dtRes.ok) {
+          const list: Array<{ token: string }> = await dtRes.json();
+          if (list.length > 0 && list[0].token) {
+            tokensToSend.add(list[0].token.trim());
+            foundToken = true;
+          }
+        }
+
+        // 2. Fallback to customers table if no device_tokens row exists
+        if (!foundToken) {
+          const custRes = await fetch(`${supabaseUrl}/rest/v1/customers?select=fcm_token&or=(id.eq.${payload.userId},auth_user_id.eq.${payload.userId})&fcm_token=not.is.null&limit=1`, {
             headers: {
               "apikey": serviceKey,
               "Authorization": `Bearer ${serviceKey}`
             }
           });
           if (custRes.ok) {
-            const customers: Array<{ fcm_token: string }> = await custRes.json();
-            const uniqueTokens = Array.from(new Set(customers.map(c => c.fcm_token).filter(Boolean)));
-            await Promise.allSettled(uniqueTokens.map(tok => sendFcmMessage({ token: tok })));
+            const custs: Array<{ fcm_token: string }> = await custRes.json();
+            if (custs.length > 0 && custs[0].fcm_token) {
+              tokensToSend.add(custs[0].fcm_token.trim());
+            }
           }
         }
-      } catch (dbErr) {
-        console.warn("DB token fetch notice (topic sent successfully):", dbErr);
+      } catch (err) {
+        console.warn("Error fetching user device tokens:", err);
       }
     }
 
-    return new Response(JSON.stringify({ success: true }), {
+    if (tokensToSend.size > 0) {
+      await Promise.allSettled(Array.from(tokensToSend).map(tok => sendToFcmTarget({ token: tok })));
+    } else if (payload.topic) {
+      await sendToFcmTarget({ topic: payload.topic });
+    }
+
+    return new Response(JSON.stringify({ success: true, count: tokensToSend.size }), {
       headers: { "Content-Type": "application/json" }
     });
 

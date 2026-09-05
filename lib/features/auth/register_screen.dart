@@ -28,11 +28,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
   bool _agreeToTerms = false;
 
   List<Map<String, dynamic>> _areas = [];
-  List<Map<String, dynamic>> _roads = [];
-  List<Map<String, dynamic>> _subRoads = [];
   String? _selectedAreaId;
-  String? _selectedRoadId;
-  String? _selectedSubRoadId;
 
   @override
   void initState() {
@@ -51,46 +47,6 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
       });
     } catch (e) {
       debugPrint('Failed to load areas: $e');
-    }
-  }
-
-  void _loadRoads(String areaId) async {
-    setState(() {
-      _roads = [];
-      _subRoads = [];
-      _selectedRoadId = null;
-      _selectedSubRoadId = null;
-    });
-    try {
-      final List<dynamic> res = await Supabase.instance.client
-          .from('roads')
-          .select()
-          .eq('area_id', areaId)
-          .order('name', ascending: true);
-      setState(() {
-        _roads = List<Map<String, dynamic>>.from(res);
-      });
-    } catch (e) {
-      debugPrint('Failed to load roads: $e');
-    }
-  }
-
-  void _loadSubRoads(String roadId) async {
-    setState(() {
-      _subRoads = [];
-      _selectedSubRoadId = null;
-    });
-    try {
-      final List<dynamic> res = await Supabase.instance.client
-          .from('sub_roads')
-          .select()
-          .eq('road_id', roadId)
-          .order('name', ascending: true);
-      setState(() {
-        _subRoads = List<Map<String, dynamic>>.from(res);
-      });
-    } catch (e) {
-      debugPrint('Failed to load sub-roads: $e');
     }
   }
 
@@ -123,24 +79,16 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
       );
       return;
     }
-    if (_selectedRoadId == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please select your delivery Road.'),
-          backgroundColor: Colors.red,
-        ),
-      );
-      return;
-    }
     if (_formKey.currentState!.validate()) {
+      final digits = _phoneController.text.trim().replaceAll(RegExp(r'\D'), '');
       final success = await ref.read(authProvider.notifier).register(
             name: _nameController.text.trim(),
-            phone: _phoneController.text.trim(),
+            phone: digits,
             password: _passwordController.text,
             address: _addressController.text.trim(),
             areaId: _selectedAreaId,
-            roadId: _selectedRoadId,
-            subRoadId: _selectedSubRoadId,
+            roadId: null,
+            subRoadId: null,
           );
 
       if (!mounted) return;
@@ -269,6 +217,12 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                         autofillHints: const [AutofillHints.telephoneNumber, AutofillHints.username],
                         keyboardType: TextInputType.phone,
                         textInputAction: TextInputAction.next,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                          LengthLimitingTextInputFormatter(10),
+                        ],
+                        maxLength: 10,
+                        buildCounter: (context, {required currentLength, required isFocused, maxLength}) => null,
                         decoration: InputDecoration(
                           labelText: 'Mobile Number',
                           prefixIcon: const Icon(Icons.phone_outlined, size: 20, color: Color(0xFF1B3624)),
@@ -288,8 +242,12 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                           if (val == null || val.trim().isEmpty) {
                             return 'Please enter your mobile number';
                           }
-                          if (val.trim().length < 10) {
-                            return 'Enter valid 10-digit number';
+                          final digits = val.trim().replaceAll(RegExp(r'\D'), '');
+                          if (digits.length != 10) {
+                            return 'Mobile number must be exactly 10 digits';
+                          }
+                          if (!RegExp(r'^[6-9]\d{9}$').hasMatch(digits)) {
+                            return 'Enter a valid 10-digit mobile number';
                           }
                           return null;
                         },
@@ -383,12 +341,11 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                       ),
                       const SizedBox(height: 16),
 
-
-                    // Area Dropdown
+                    // Area Dropdown (Road selection is omitted)
                     DropdownButtonFormField<String>(
-                      initialValue: _selectedAreaId,
+                      value: _selectedAreaId,
                       decoration: InputDecoration(
-                        labelText: 'Select Area',
+                        labelText: 'Select Delivery Area',
                         prefixIcon: const Icon(Icons.map_outlined, color: Color(0xFF1B3624)),
                         filled: true,
                         fillColor: const Color(0xFFF8FAFC),
@@ -399,8 +356,8 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                       ),
                       items: _areas.map((a) {
                         return DropdownMenuItem<String>(
-                          value: a['id'] as String,
-                          child: Text(a['name'] as String),
+                          value: a['id']?.toString() ?? '',
+                          child: Text(a['name']?.toString() ?? ''),
                         );
                       }).toList(),
                       onChanged: (val) {
@@ -408,77 +365,11 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                           setState(() {
                             _selectedAreaId = val;
                           });
-                          _loadRoads(val);
                         }
                       },
                       validator: (val) => val == null ? 'Please select an area' : null,
                     ),
                     const SizedBox(height: 16),
-
-                    // Road Dropdown
-                    DropdownButtonFormField<String>(
-                      initialValue: _selectedRoadId,
-                      decoration: InputDecoration(
-                        labelText: 'Select Road',
-                        prefixIcon: const Icon(Icons.alt_route_outlined, color: Color(0xFF1B3624)),
-                        filled: true,
-                        fillColor: const Color(0xFFF8FAFC),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(14),
-                          borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
-                        ),
-                      ),
-                      disabledHint: const Text('Select an Area first'),
-                      items: _selectedAreaId == null
-                          ? []
-                          : _roads.map((r) {
-                              return DropdownMenuItem<String>(
-                                value: r['id'] as String,
-                                child: Text(r['name'] as String),
-                              );
-                            }).toList(),
-                      onChanged: _selectedAreaId == null
-                          ? null
-                          : (val) {
-                              if (val != null) {
-                                setState(() {
-                                  _selectedRoadId = val;
-                                });
-                                _loadSubRoads(val);
-                              }
-                            },
-                      validator: (val) => val == null ? 'Please select a road' : null,
-                    ),
-                    const SizedBox(height: 16),
-
-                    // Sub-Road Dropdown (Optional)
-                    if (_selectedRoadId != null && _subRoads.isNotEmpty) ...[
-                      DropdownButtonFormField<String>(
-                        initialValue: _selectedSubRoadId,
-                        decoration: InputDecoration(
-                          labelText: 'Select Sub-Road (Optional)',
-                          prefixIcon: const Icon(Icons.subdirectory_arrow_right_outlined, color: Color(0xFF1B3624)),
-                          filled: true,
-                          fillColor: const Color(0xFFF8FAFC),
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(14),
-                            borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
-                          ),
-                        ),
-                        items: _subRoads.map((sr) {
-                          return DropdownMenuItem<String>(
-                            value: sr['id'] as String,
-                            child: Text(sr['name'] as String),
-                          );
-                        }).toList(),
-                        onChanged: (val) {
-                          setState(() {
-                            _selectedSubRoadId = val;
-                          });
-                        },
-                      ),
-                      const SizedBox(height: 16),
-                    ],
 
                     // Address
                     TextFormField(
@@ -486,7 +377,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                       decoration: InputDecoration(
                         labelText: 'Delivery Address / Flat / Landmark',
                         prefixIcon: const Icon(Icons.location_on_outlined, color: Color(0xFF1B3624)),
-                        hintText: 'e.g. Flat 302, Green Heights, Baner, Pune',
+                        hintText: 'e.g. Flat 302, Green Heights, Bangar Nagar, Yavatmal',
                         filled: true,
                         fillColor: const Color(0xFFF8FAFC),
                         border: OutlineInputBorder(

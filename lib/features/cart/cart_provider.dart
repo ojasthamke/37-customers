@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' hide AuthState;
+import 'package:uuid/uuid.dart';
 import '../../core/database/database_helper.dart';
 
 class CartItem {
@@ -50,22 +51,31 @@ class CartState {
   final Map<String, CartItem> items;
   final double deliveryChargeValue;
   final double freeDeliveryLimit;
+  final String idempotencyKey;
 
   CartState({
     this.items = const {},
     this.deliveryChargeValue = 30.0,
     this.freeDeliveryLimit = 300.0,
-  });
+    String? idempotencyKey,
+  }) : idempotencyKey = (idempotencyKey != null && idempotencyKey.isNotEmpty)
+            ? idempotencyKey
+            : const Uuid().v4();
 
   CartState copyWith({
     Map<String, CartItem>? items,
     double? deliveryChargeValue,
     double? freeDeliveryLimit,
+    String? idempotencyKey,
+    bool resetIdempotencyKey = false,
   }) {
     return CartState(
       items: items ?? this.items,
       deliveryChargeValue: deliveryChargeValue ?? this.deliveryChargeValue,
       freeDeliveryLimit: freeDeliveryLimit ?? this.freeDeliveryLimit,
+      idempotencyKey: resetIdempotencyKey
+          ? const Uuid().v4()
+          : (idempotencyKey ?? this.idempotencyKey),
     );
   }
 
@@ -83,16 +93,27 @@ class CartState {
   /// Rounded to nearest multiple of 5 (ceil) for clean retail POS receipts
   double get roundedGrandTotal {
     if (unroundedGrandTotal == 0) return 0.0;
-    return (unroundedGrandTotal / 5.0).ceil() * 5.0;
+    // Normalize to 2 decimal places to remove floating-point precision noise (e.g. 150.00000000000003)
+    final normalized = (unroundedGrandTotal * 100).round() / 100.0;
+    return (normalized / 5.0).ceil() * 5.0;
   }
 
   /// Rounding difference added to delivery fee
   double get roundingDifference => roundedGrandTotal - unroundedGrandTotal;
 
-  /// Final delivery charge including the auto round-off adjustment
+  /// Final delivery charge including the auto round-off adjustment.
+  /// When delivery is free (baseDeliveryCharge == 0), the rounding difference
+  /// is NOT folded into delivery fee — it's shown as a separate round-off line.
   double get deliveryCharge {
-    if (baseDeliveryCharge == 0 && roundingDifference == 0) return 0.0;
+    if (baseDeliveryCharge == 0) return 0.0;
     return baseDeliveryCharge + roundingDifference;
+  }
+
+  /// The portion of the rounding that is NOT accounted for by the delivery charge.
+  /// Non-zero only when delivery is free but subtotal isn't a multiple of 5.
+  double get separateRoundingAdjustment {
+    if (baseDeliveryCharge == 0) return roundingDifference;
+    return 0.0;
   }
 
   double get grandTotal => roundedGrandTotal;
@@ -195,7 +216,18 @@ class CartNotifier extends StateNotifier<CartState> {
       );
       if (res.isNotEmpty) {
         final String val = res.first['value'] as String;
-        final List<dynamic> decoded = jsonDecode(val);
+        final dynamic decodedRaw = jsonDecode(val);
+        List<dynamic> decoded;
+        String? loadedIdempotencyKey;
+        if (decodedRaw is Map<String, dynamic>) {
+          decoded = decodedRaw['items'] as List<dynamic>? ?? [];
+          loadedIdempotencyKey = decodedRaw['idempotencyKey']?.toString();
+        } else if (decodedRaw is List<dynamic>) {
+          decoded = decodedRaw;
+        } else {
+          decoded = [];
+        }
+
         final Map<String, CartItem> items = {};
         for (var item in decoded) {
           final String prodId = item['productId']?.toString() ?? '';
@@ -216,17 +248,25 @@ class CartNotifier extends StateNotifier<CartState> {
             imagePath: item['imagePath']?.toString() ?? item['image_path']?.toString(),
           );
         }
-        state = state.copyWith(items: items);
+        state = state.copyWith(
+          items: items,
+          idempotencyKey: loadedIdempotencyKey,
+        );
       }
     } catch (_) {
       // Ignore load error on startup
     }
   }
 
-  Future<void> _saveCart(CartState newState) async {
+  int _saveVersion = 0;
+
+  Future<void> _saveCart([CartState? targetState]) async {
+    final int thisVersion = ++_saveVersion;
     try {
       final db = await DatabaseHelper.instance.database;
-      final List<Map<String, dynamic>> list = newState.items.values.map((item) => {
+      if (thisVersion != _saveVersion) return;
+      final CartState stateToSave = targetState ?? state;
+      final List<Map<String, dynamic>> list = stateToSave.items.values.map((item) => {
         'productId': item.productId,
         'productName': item.productName,
         'price': item.price,
@@ -235,7 +275,12 @@ class CartNotifier extends StateNotifier<CartState> {
         'isOrderNow': item.isOrderNow,
         'imagePath': item.imagePath,
       }).toList();
-      final String val = jsonEncode(list);
+      final Map<String, dynamic> payload = {
+        'items': list,
+        'idempotencyKey': stateToSave.idempotencyKey,
+      };
+      final String val = jsonEncode(payload);
+      if (thisVersion != _saveVersion) return;
       await db.insert(
         'settings',
         {'key': _storageKey, 'value': val},
@@ -282,7 +327,7 @@ class CartNotifier extends StateNotifier<CartState> {
       );
     }
 
-    final newState = state.copyWith(items: updatedItems);
+    final newState = state.copyWith(items: updatedItems, resetIdempotencyKey: true);
     state = newState;
     _saveCart(newState);
   }
@@ -302,7 +347,7 @@ class CartNotifier extends StateNotifier<CartState> {
     final Map<String, CartItem> updatedItems = Map.from(state.items);
     updatedItems[cleanId] = existing.copyWith(quantity: cleanQty);
     
-    final newState = state.copyWith(items: updatedItems);
+    final newState = state.copyWith(items: updatedItems, resetIdempotencyKey: true);
     state = newState;
     _saveCart(newState);
   }
@@ -334,7 +379,7 @@ class CartNotifier extends StateNotifier<CartState> {
     final Map<String, CartItem> updatedItems = Map.from(state.items);
     updatedItems.remove(cleanId);
     
-    final newState = state.copyWith(items: updatedItems);
+    final newState = state.copyWith(items: updatedItems, resetIdempotencyKey: true);
     state = newState;
     _saveCart(newState);
   }
@@ -344,13 +389,13 @@ class CartNotifier extends StateNotifier<CartState> {
     for (final item in itemsList) {
       updatedItems[item.productId] = item;
     }
-    final newState = state.copyWith(items: updatedItems);
+    final newState = state.copyWith(items: updatedItems, resetIdempotencyKey: true);
     state = newState;
     _saveCart(newState);
   }
 
   void clear() {
-    final newState = state.copyWith(items: {});
+    final newState = state.copyWith(items: {}, resetIdempotencyKey: true);
     state = newState;
     _saveCart(newState);
   }
@@ -428,8 +473,8 @@ final appSettingsProvider = StreamProvider<Map<String, String>>((ref) async* {
     }
   } catch (_) {}
 
-  // 2. Check if cache is stale (TTL for store settings is 1 hour)
-  final bool isStale = await dbHelper.isCacheStale('store_settings', const Duration(hours: 1));
+  // 2. Check if cache is stale (TTL for store settings is 30 seconds)
+  final bool isStale = await dbHelper.isCacheStale('store_settings', const Duration(seconds: 30));
 
   Future<Map<String, String>?> fetchRemoteSettings() async {
     try {
@@ -467,10 +512,37 @@ final appSettingsProvider = StreamProvider<Map<String, String>>((ref) async* {
     debugPrint('[Cache] Store settings cache hit (fresh).');
   }
 
-  // 3. Sensible polling loop (every 60 seconds instead of 3 seconds) for background updates
-  while (true) {
-    await Future.delayed(const Duration(seconds: 60));
+  bool isDisposed = false;
+  RealtimeChannel? realtimeChannel;
+  try {
+    realtimeChannel = Supabase.instance.client
+        .channel('public:settings_changes')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'settings',
+          callback: (payload) {
+            ref.invalidateSelf();
+          },
+        )
+        .subscribe();
+  } catch (e) {
+    debugPrint('[Cache] Realtime settings subscribe error: $e');
+  }
+
+  ref.onDispose(() {
+    isDisposed = true;
+    try {
+      realtimeChannel?.unsubscribe();
+    } catch (_) {}
+  });
+
+  // 3. Fallback polling loop (every 15 seconds) for background updates
+  while (!isDisposed) {
+    await Future.delayed(const Duration(seconds: 15));
+    if (isDisposed) break;
     final remote = await fetchRemoteSettings();
+    if (isDisposed) break;
     if (remote != null && remote.isNotEmpty) {
       bool changed = false;
       if (remote.length != cached.length) {
@@ -483,7 +555,7 @@ final appSettingsProvider = StreamProvider<Map<String, String>>((ref) async* {
           }
         }
       }
-      if (changed) {
+      if (changed && !isDisposed) {
         debugPrint('[Cache] Store settings updated in background.');
         cached = remote;
         yield remote;

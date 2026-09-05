@@ -35,7 +35,7 @@ class DatabaseHelper {
 
     return openDatabase(
       path,
-      version: 9,
+      version: 10,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
       onOpen: (db) async {
@@ -44,12 +44,19 @@ class DatabaseHelper {
         try { await db.execute("ALTER TABLE customers ADD COLUMN area_name TEXT"); } catch (_) {}
         try { await db.execute("ALTER TABLE customers ADD COLUMN road_name TEXT"); } catch (_) {}
         try { await db.execute("ALTER TABLE customers ADD COLUMN sub_road_name TEXT"); } catch (_) {}
+        try { await db.execute("ALTER TABLE customers ADD COLUMN auth_provider TEXT DEFAULT 'phone_password'"); } catch (_) {}
+        try { await db.execute("ALTER TABLE customers ADD COLUMN google_id TEXT"); } catch (_) {}
+        try { await db.execute("ALTER TABLE customers ADD COLUMN is_new_customer INTEGER DEFAULT 0"); } catch (_) {}
+        try { await db.execute("ALTER TABLE products ADD COLUMN stock REAL DEFAULT 0.0"); } catch (_) {}
         try { await db.execute("ALTER TABLE products ADD COLUMN order_now_stock REAL DEFAULT 0.0"); } catch (_) {}
         try { await db.execute("ALTER TABLE products ADD COLUMN order_now_price REAL DEFAULT 0.0"); } catch (_) {}
         try { await db.execute("ALTER TABLE products ADD COLUMN order_now_mrp REAL DEFAULT 0.0"); } catch (_) {}
         try { await db.execute("ALTER TABLE products ADD COLUMN order_now_cost_price REAL DEFAULT 0.0"); } catch (_) {}
-        try { await db.execute("ALTER TABLE products ADD COLUMN order_now_is_available INTEGER DEFAULT 1"); } catch (_) {}
+        try { await db.execute("ALTER TABLE products ADD COLUMN order_now_is_available INTEGER DEFAULT 0"); } catch (_) {}
         try { await db.execute("ALTER TABLE order_items ADD COLUMN total_price REAL DEFAULT 0.0"); } catch (_) {}
+        try { await db.execute("ALTER TABLE orders ADD COLUMN idempotency_key TEXT"); } catch (_) {}
+        try { await db.execute("ALTER TABLE orders ADD COLUMN sync_retry_count INTEGER DEFAULT 0"); } catch (_) {}
+        try { await db.execute("ALTER TABLE orders ADD COLUMN is_new_customer_order INTEGER DEFAULT 0"); } catch (_) {}
         try {
           await db.execute('''
             CREATE TABLE IF NOT EXISTS customer_login_logs (
@@ -110,6 +117,7 @@ class DatabaseHelper {
         description TEXT,
         price REAL,
         unit TEXT,
+        stock REAL DEFAULT 0.0,
         is_available INTEGER DEFAULT 1,
         is_enabled INTEGER DEFAULT 1,
         created_at TEXT,
@@ -136,6 +144,9 @@ class DatabaseHelper {
         sub_road_name TEXT,
         delivery_schedule TEXT,
         cutoff_time TEXT DEFAULT '23:59',
+        auth_provider TEXT DEFAULT 'phone_password',
+        google_id TEXT,
+        is_new_customer INTEGER DEFAULT 0,
         created_at TEXT
       )
     ''');
@@ -163,6 +174,9 @@ class DatabaseHelper {
         order_type TEXT DEFAULT 'Normal',
         order_taking_date TEXT,
         sync_status TEXT DEFAULT 'synced',
+        idempotency_key TEXT,
+        sync_retry_count INTEGER DEFAULT 0,
+        is_new_customer_order INTEGER DEFAULT 0,
         created_at TEXT,
         FOREIGN KEY (customer_id) REFERENCES customers (id) ON DELETE SET NULL
       )
@@ -204,7 +218,7 @@ class DatabaseHelper {
     // Seed default settings
     await db.insert('settings', {'key': 'store_name', 'value': 'ApliBhaji Store'});
     await db.insert('settings', {'key': 'store_phone', 'value': '+91 9021107009'});
-    await db.insert('settings', {'key': 'store_address', 'value': 'Main Bazar, Pune, Maharashtra'});
+    await db.insert('settings', {'key': 'store_address', 'value': 'Main Bazar, Yavatmal, Maharashtra'});
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
@@ -290,6 +304,12 @@ class DatabaseHelper {
       try { await db.execute("ALTER TABLE customers ADD COLUMN road_name TEXT"); } catch (_) {}
       try { await db.execute("ALTER TABLE customers ADD COLUMN sub_road_name TEXT"); } catch (_) {}
     }
+    if (oldVersion < 10) {
+      try { await db.execute("ALTER TABLE customers ADD COLUMN auth_provider TEXT DEFAULT 'phone_password'"); } catch (_) {}
+      try { await db.execute("ALTER TABLE customers ADD COLUMN google_id TEXT"); } catch (_) {}
+      try { await db.execute("ALTER TABLE customers ADD COLUMN is_new_customer INTEGER DEFAULT 0"); } catch (_) {}
+      try { await db.execute("ALTER TABLE orders ADD COLUMN is_new_customer_order INTEGER DEFAULT 0"); } catch (_) {}
+    }
   }
 
   Future<void> clearOfflineOrders() async {
@@ -307,6 +327,8 @@ class DatabaseHelper {
       await db.delete('orders');
       await db.delete('order_items');
       await db.delete('cache_metadata');
+      await db.delete('customer_login_logs');
+      await db.delete('settings', where: 'key IN (?, ?)', whereArgs: ['cart_items', 'quick_cart_items']);
     } catch (_) {}
   }
 

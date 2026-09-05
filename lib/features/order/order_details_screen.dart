@@ -9,6 +9,8 @@ import 'order_provider.dart';
 import '../dashboard/home_screen.dart';
 import '../cart/cart_provider.dart';
 import '../../core/widgets/ambient_background.dart';
+import '../../core/database/database_helper.dart';
+import '../../core/utils/product_helper.dart';
 
 class OrderDetailsScreen extends ConsumerWidget {
   final String orderId;
@@ -112,16 +114,39 @@ class OrderDetailsScreen extends ConsumerWidget {
                           builder: (context) => const Center(child: CircularProgressIndicator()),
                         );
                         try {
-                          final client = Supabase.instance.client;
-                          final productIds = details.items.map((i) => i['product_id'] as String).toList();
-                          final response = await client.from('products').select().inFilter('id', productIds);
+                          final productIds = details.items
+                              .map((i) => i['product_id']?.toString())
+                              .whereType<String>()
+                              .where((id) => id.isNotEmpty)
+                              .toList();
+                          List<Map<String, dynamic>> currentProducts = [];
+                          try {
+                            final client = Supabase.instance.client;
+                            final response = await client.from('products').select().inFilter('id', productIds).timeout(const Duration(seconds: 10));
+                            currentProducts = List<Map<String, dynamic>>.from(response);
+                          } catch (_) {
+                            // Fallback to local SQLite cache
+                            final db = await DatabaseHelper.instance.database;
+                            final placeholders = List.filled(productIds.length, '?').join(',');
+                            final localRes = await db.query(
+                              'products',
+                              where: 'id IN ($placeholders)',
+                              whereArgs: productIds,
+                            );
+                            currentProducts = List<Map<String, dynamic>>.from(localRes);
+                          }
+
                           if (context.mounted) {
                             Navigator.pop(context);
                           }
-                          final currentProducts = List<Map<String, dynamic>>.from(response);
                           if (context.mounted) {
-                            _showReorderDialog(context, ref, details.items, currentProducts, orderType: details.order['order_type']?.toString());
-
+                            if (currentProducts.isNotEmpty) {
+                              _showReorderDialog(context, ref, details.items, currentProducts, orderType: details.order['order_type']?.toString());
+                            } else {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Products are currently unavailable.'), backgroundColor: Colors.orange),
+                              );
+                            }
                           }
                         } catch (e) {
                           if (context.mounted) {
@@ -171,18 +196,19 @@ class OrderDetailsScreen extends ConsumerWidget {
       ),
       body: detailsAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (err, stack) => Center(child: Text('Error loading details: $err')),
+        error: (err, stack) => _buildErrorOrOfflineState(context, ref, err),
         data: (details) {
           final order = details.order;
           final items = details.items;
 
+          final availableItems = items.where((item) => !_isItemUnavailable(item)).toList();
           double subtotal = 0.0;
-          for (final item in items) {
+          for (final item in availableItems) {
             subtotal += (item['total_price'] as num?)?.toDouble() ?? 0.0;
           }
           final totalAmount = (order['total_amount'] as num?)?.toDouble() ?? 0.0;
-          final deliveryCharge = totalAmount - subtotal;
-          final displayDeliveryCharge = deliveryCharge > 0.08 ? deliveryCharge : 0.0;
+          final deliveryCharge = items.isEmpty ? 0.0 : (totalAmount - subtotal);
+          final displayDeliveryCharge = (deliveryCharge > 0.08 && items.isNotEmpty) ? deliveryCharge : 0.0;
 
           final orderDate = (DateTime.tryParse(order['order_date'] ?? '') ?? DateTime.now()).toLocal();
           final formattedDate = DateFormat('dd MMM yyyy, hh:mm a').format(orderDate);
@@ -246,7 +272,7 @@ class OrderDetailsScreen extends ConsumerWidget {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  '${order['order_number'] ?? order['offline_order_no'] ?? ''}${order['sync_status'] == 'pending' || order['sync_status'] == 'failed' ? ' (Offline)' : ''}',
+                                  '${order['order_number'] ?? order['offline_order_no'] ?? ''}${order['sync_status'] == 'permanently_failed' ? ' (Sync Failed)' : (order['sync_status'] == 'pending' || order['sync_status'] == 'failed' ? ' (Offline)' : '')}',
                                   style: GoogleFonts.outfit(
                                     fontSize: 18,
                                     fontWeight: FontWeight.w800,
@@ -276,6 +302,89 @@ class OrderDetailsScreen extends ConsumerWidget {
                         ],
                       ),
                     ),
+
+                    if (order['sync_status'] == 'permanently_failed') ...[
+                      Container(
+                        margin: const EdgeInsets.only(bottom: 18),
+                        padding: const EdgeInsets.all(16.0),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFEF2F2),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: const Color(0xFFFCA5A5)),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const Icon(Icons.cloud_off_rounded, color: Color(0xFFDC2626), size: 22),
+                                const SizedBox(width: 8),
+                                Text(
+                                  'Order Sync Failed',
+                                  style: GoogleFonts.outfit(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                    color: const Color(0xFF991B1B),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              'This order could not be synced to the server after multiple attempts. You can retry syncing or dismiss this order.',
+                              style: GoogleFonts.inter(
+                                fontSize: 13,
+                                color: const Color(0xFF7F1D1D),
+                                height: 1.4,
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            Row(
+                              children: [
+                                ElevatedButton.icon(
+                                  onPressed: () async {
+                                    final orderId = order['id']?.toString() ?? '';
+                                    if (orderId.isNotEmpty) {
+                                      await ref.read(orderListProvider.notifier).retryOrderSync(orderId);
+                                      if (context.mounted) {
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          const SnackBar(content: Text('Retrying order sync...')),
+                                        );
+                                      }
+                                    }
+                                  },
+                                  icon: const Icon(Icons.refresh_rounded, size: 16, color: Colors.white),
+                                  label: const Text('Retry Sync', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: const Color(0xFFDC2626),
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                OutlinedButton(
+                                  onPressed: () async {
+                                    final orderId = order['id']?.toString() ?? '';
+                                    if (orderId.isNotEmpty) {
+                                      await ref.read(orderListProvider.notifier).dismissFailedOrder(orderId);
+                                      if (context.mounted) {
+                                        Navigator.pop(context);
+                                      }
+                                    }
+                                  },
+                                  style: OutlinedButton.styleFrom(
+                                    side: const BorderSide(color: Color(0xFFCBD5E1)),
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                                  ),
+                                  child: const Text('Dismiss', style: TextStyle(color: Color(0xFF64748B), fontWeight: FontWeight.bold)),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
 
                     // ── 2. ELEGANT TOP DELIVERY INFO (MINIMALISTIC WARNING FORMAT) ──
                     _buildTopDeliveryWarningCard(order),
@@ -512,22 +621,15 @@ class OrderDetailsScreen extends ConsumerWidget {
   /// Distinguished, elegant Ordered Items list card with clear formatting
   Widget _buildOrderedItemsCard(
       List<dynamic> items, double subtotal, double displayDeliveryCharge, double totalAmount) {
-    final availableItems = items.where((item) {
-      final double totalPrice = (item['total_price'] as num?)?.toDouble() ?? 1.0;
-      final bool isAvailable = item['is_available'] != false && totalPrice > 0.001;
-      return isAvailable;
-    }).toList();
-    final unavailableItems = items.where((item) {
-      final double totalPrice = (item['total_price'] as num?)?.toDouble() ?? 1.0;
-      final bool isAvailable = item['is_available'] != false && totalPrice > 0.001;
-      return !isAvailable;
-    }).toList();
+    final availableItems = items.where((item) => !_isItemUnavailable(item)).toList();
+    final unavailableItems = items.where((item) => _isItemUnavailable(item)).toList();
 
     double totalDeducted = 0.0;
     for (final item in unavailableItems) {
       final double qty = (item['quantity'] as num?)?.toDouble() ?? 1.0;
       final double price = (item['price'] as num?)?.toDouble() ?? 0.0;
-      totalDeducted += (item['total_price'] as num?)?.toDouble() ?? (qty * price);
+      final double itemTotal = (item['total_price'] as num?)?.toDouble() ?? 0.0;
+      totalDeducted += itemTotal > 0.001 ? itemTotal : (qty * price);
     }
 
     return Container(
@@ -980,6 +1082,26 @@ class OrderDetailsScreen extends ConsumerWidget {
   }
 
   Widget _buildStatusChip(Map<String, dynamic> order) {
+    final syncStatus = order['sync_status']?.toString();
+    if (syncStatus == 'permanently_failed') {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFEE2E2),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: const Color(0xFFFCA5A5), width: 0.8),
+        ),
+        child: const Text(
+          'Sync Failed',
+          style: TextStyle(
+            color: Color(0xFFDC2626),
+            fontSize: 12,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      );
+    }
+
     final status = order['status'] ?? 'Pending';
     final orderType = order['order_type'] ?? '';
     
@@ -994,23 +1116,33 @@ class OrderDetailsScreen extends ConsumerWidget {
         color = Colors.amber[800]!;
       }
     } else {
-      switch (status) {
-        case 'Confirmed':
+      switch (status.toString().toLowerCase()) {
+        case 'confirmed':
+          displayStatus = 'Confirmed';
           color = Colors.blue;
           break;
-        case 'Preparing':
+        case 'preparing':
+          displayStatus = 'Preparing';
           color = Colors.purple;
           break;
-        case 'Out for Delivery':
+        case 'out for delivery':
+          displayStatus = 'Out for Delivery';
           color = Colors.teal;
           break;
-        case 'Delivered':
+        case 'delivered':
+          displayStatus = 'Delivered';
           color = const Color(0xFF10B981);
           break;
-        case 'Cancelled':
+        case 'cancelled':
+          displayStatus = 'Cancelled';
+          color = Colors.red;
+          break;
+        case 'denied':
+          displayStatus = 'Denied';
           color = Colors.red;
           break;
         default:
+          displayStatus = status;
           color = Colors.grey;
       }
     }
@@ -1074,7 +1206,8 @@ class OrderDetailsScreen extends ConsumerWidget {
   }
 
   Widget _buildProgressStepper(String status, ThemeData theme) {
-    if (status == 'Cancelled') {
+    final normStatus = status.toLowerCase();
+    if (normStatus == 'cancelled' || normStatus == 'denied') {
       return Container(
         margin: const EdgeInsets.only(bottom: 18),
         padding: const EdgeInsets.all(16.0),
@@ -1083,13 +1216,13 @@ class OrderDetailsScreen extends ConsumerWidget {
           borderRadius: BorderRadius.circular(14),
           border: Border.all(color: const Color(0xFFFECACA), width: 1.0),
         ),
-        child: const Row(
+        child: Row(
           children: [
-            Icon(Icons.cancel_rounded, color: Color(0xFFDC2626)),
-            SizedBox(width: 12),
+            const Icon(Icons.cancel_rounded, color: Color(0xFFDC2626)),
+            const SizedBox(width: 12),
             Text(
-              'This order was cancelled.',
-              style: TextStyle(color: Color(0xFFDC2626), fontWeight: FontWeight.bold),
+              normStatus == 'denied' ? 'This order was declined.' : 'This order was cancelled.',
+              style: const TextStyle(color: Color(0xFFDC2626), fontWeight: FontWeight.bold),
             ),
           ],
         ),
@@ -1214,12 +1347,18 @@ class OrderDetailsScreen extends ConsumerWidget {
                       ),
                     ),
                     const SizedBox(height: 6),
-                    Text(
-                      step['name'] as String,
-                      style: GoogleFonts.inter(
-                        fontSize: 10.5,
-                        fontWeight: isPassed ? FontWeight.w700 : FontWeight.w500,
-                        color: isPassed ? const Color(0xFF0F172A) : const Color(0xFF94A3B8),
+                    SizedBox(
+                      width: 50,
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(
+                          step['name']?.toString() ?? '',
+                          style: GoogleFonts.inter(
+                            fontSize: 10.5,
+                            fontWeight: isPassed ? FontWeight.w700 : FontWeight.w500,
+                            color: isPassed ? const Color(0xFF0F172A) : const Color(0xFF94A3B8),
+                          ),
+                        ),
                       ),
                     ),
                   ],
@@ -1284,31 +1423,28 @@ class OrderDetailsScreen extends ConsumerWidget {
         (p) => (p['id']?.toString() ?? '') == pid,
         orElse: () => {},
       );
-      if (currentProd.isEmpty || currentProd['is_enabled'] == false) {
+      if (currentProd.isEmpty || !ProductHelper.isEnabled(currentProd)) {
         continue;
       }
-      if (isQuick) {
-        final onStock = (currentProd['order_now_stock'] as num?)?.toDouble() ?? 0.0;
-        final isAvail = (currentProd['order_now_is_available'] == null ||
-            currentProd['order_now_is_available'] == true ||
-            currentProd['order_now_is_available'] == 1) && onStock > 0;
-        if (!isAvail) continue;
-      } else {
-        final st = (currentProd['stock'] as num?)?.toDouble() ?? 0.0;
-        final isAvail = (currentProd['is_available'] == true || currentProd['is_available'] == 1) && st > 0;
-        if (!isAvail) continue;
-      }
+      final bool isAvail = ProductHelper.isAvailable(currentProd, isOrderNow: isQuick);
+      if (!isAvail) continue;
 
-      final price = isQuick
-          ? ((currentProd['order_now_price'] as num?)?.toDouble() ?? (currentProd['price'] as num?)?.toDouble() ?? 0.0)
-          : ((currentProd['price'] as num?)?.toDouble() ?? 0.0);
+      final double stockNum = ProductHelper.getStock(currentProd, isOrderNow: isQuick);
+      final price = ProductHelper.getPrice(currentProd, isOrderNow: isQuick);
+
+      final double rawQty = (item['quantity'] as num?)?.toDouble() ?? 1.0;
+      final double availableStock = stockNum;
+      if (availableStock <= 0) continue;
+      final double safeQty = (rawQty > availableStock) ? availableStock : rawQty;
+      if (safeQty <= 0) continue;
 
       selectedItems[pid] = {
         'product_id': pid,
         'product_name': currentProd['name'] ?? item['product_name'] ?? 'N/A',
         'price': price,
         'unit': currentProd['unit'] ?? item['unit'] ?? '',
-        'quantity': (item['quantity'] as num?)?.toDouble() ?? 1.0,
+        'quantity': safeQty,
+        'stock': stockNum,
       };
     }
 
@@ -1403,11 +1539,11 @@ class OrderDetailsScreen extends ConsumerWidget {
                       child: SingleChildScrollView(
                         child: Column(
                           children: selectedItems.values.map((item) {
-                            final pid = item['product_id'] as String;
-                            final name = item['product_name'] as String;
-                            final price = item['price'] as double;
-                            final unit = item['unit'] as String;
-                            final qty = item['quantity'] as double;
+                            final pid = item['product_id']?.toString() ?? '';
+                            final name = item['product_name']?.toString() ?? '';
+                            final price = (item['price'] as num?)?.toDouble() ?? 0.0;
+                            final unit = item['unit']?.toString() ?? 'kg';
+                            final qty = (item['quantity'] as num?)?.toDouble() ?? 1.0;
 
                             return Padding(
                               padding: const EdgeInsets.symmetric(vertical: 8.0),
@@ -1450,18 +1586,25 @@ class OrderDetailsScreen extends ConsumerWidget {
                                         style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
                                       ),
                                       IconButton(
-                                        icon: const Icon(Icons.add_circle_outline_rounded, color: Color(0xFF10B981)),
-                                        onPressed: () {
-                                          setState(() {
-                                            final steps = getQuantitySteps(unit);
-                                            final nextIndex = steps.indexWhere((s) => s > qty);
-                                            if (nextIndex != -1) {
-                                              item['quantity'] = steps[nextIndex];
-                                            } else {
-                                              item['quantity'] = qty + 1.0;
-                                            }
-                                          });
-                                        },
+                                        icon: Icon(
+                                          Icons.add_circle_outline_rounded,
+                                          color: (item['stock'] != null && qty >= (item['stock'] as num).toDouble())
+                                              ? const Color(0xFFCBD5E1)
+                                              : const Color(0xFF10B981),
+                                        ),
+                                        onPressed: (item['stock'] != null && qty >= (item['stock'] as num).toDouble())
+                                            ? null
+                                            : () {
+                                                setState(() {
+                                                  final steps = getQuantitySteps(unit);
+                                                  final nextIndex = steps.indexWhere((s) => s > qty);
+                                                  double nextQty = (nextIndex != -1) ? steps[nextIndex] : qty + 1.0;
+                                                  if (item['stock'] != null && nextQty > (item['stock'] as num).toDouble()) {
+                                                    nextQty = (item['stock'] as num).toDouble();
+                                                  }
+                                                  item['quantity'] = nextQty;
+                                                });
+                                              },
                                       ),
                                     ],
                                   )
@@ -1485,11 +1628,11 @@ class OrderDetailsScreen extends ConsumerWidget {
                               final cartNotifier = ref.read(isQuick ? quickCartProvider.notifier : cartProvider.notifier);
                               for (var item in selectedItems.values) {
                                 cartNotifier.addItem(
-                                  productId: item['product_id'],
-                                  productName: item['product_name'],
-                                  price: item['price'],
-                                  unit: item['unit'],
-                                  quantity: item['quantity'],
+                                  productId: item['product_id']?.toString() ?? '',
+                                  productName: item['product_name']?.toString() ?? '',
+                                  price: (item['price'] as num?)?.toDouble() ?? 0.0,
+                                  unit: item['unit']?.toString() ?? 'kg',
+                                  quantity: (item['quantity'] as num?)?.toDouble() ?? 1.0,
                                   isOrderNow: isQuick,
                                 );
                               }
@@ -1497,17 +1640,21 @@ class OrderDetailsScreen extends ConsumerWidget {
                               ref.read(cartOriginTabProvider.notifier).state = 3;
                               ref.read(isViewingQuickOrderCartProvider.notifier).state = isQuick;
                               ref.read(activeTabProvider.notifier).state = 1;
-                              Navigator.pop(context);
-                              if (Navigator.of(context).canPop()) {
-                                Navigator.of(context).pop();
+
+                              final navigator = Navigator.of(context);
+                              final messenger = ScaffoldMessenger.of(context);
+
+                              navigator.pop();
+                              if (navigator.canPop()) {
+                                navigator.pop();
                               } else {
-                                Navigator.of(context).pushAndRemoveUntil(
+                                navigator.pushAndRemoveUntil(
                                   MaterialPageRoute(builder: (context) => const HomeScreen()),
                                   (route) => false,
                                 );
                               }
 
-                              ScaffoldMessenger.of(context).showSnackBar(
+                              messenger.showSnackBar(
                                 const SnackBar(
                                   content: Text('Items added to cart successfully!'),
                                   backgroundColor: Color(0xFF0F172A),
@@ -1528,5 +1675,106 @@ class OrderDetailsScreen extends ConsumerWidget {
       },
     );
   }
+
+  static bool _isItemUnavailable(dynamic item) {
+    if (item == null) return false;
+    final isAvail = item['is_available'];
+    if (isAvail == false || isAvail == 0 || isAvail == '0' || isAvail == 'false') {
+      return true;
+    }
+    final double totalPrice = (item['total_price'] as num?)?.toDouble() ?? 0.0;
+    final double price = (item['price'] as num?)?.toDouble() ?? 0.0;
+    final double qty = (item['quantity'] as num?)?.toDouble() ?? 0.0;
+    if (totalPrice <= 0.001 && (price > 0 || qty > 0)) {
+      return true;
+    }
+    return false;
+  }
+
+  Widget _buildErrorOrOfflineState(BuildContext context, WidgetRef ref, Object err) {
+    final errStr = err.toString();
+    final bool isOffline = errStr.contains('SocketException') ||
+        errStr.contains('ClientException') ||
+        errStr.contains('Network') ||
+        errStr.contains('Failed host lookup') ||
+        errStr.contains('TimeoutException');
+
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 28.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: isOffline ? const Color(0xFFEFF6FF) : const Color(0xFFFEF2F2),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                isOffline ? Icons.cloud_off_rounded : Icons.error_outline_rounded,
+                size: 52,
+                color: isOffline ? const Color(0xFF3B82F6) : const Color(0xFFEF4444),
+              ),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              isOffline ? "You're Offline" : 'Order Details Unavailable',
+              style: GoogleFonts.outfit(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+                color: textPrimary,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 10),
+            Text(
+              isOffline
+                  ? 'Your order was placed and stored locally. It will automatically sync to our servers as soon as your internet connection is restored.'
+                  : 'Unable to load order details at the moment: $errStr',
+              style: GoogleFonts.inter(
+                fontSize: 14,
+                color: textSecondary,
+                height: 1.5,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 24),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.arrow_back_rounded, size: 18),
+                  label: const Text('Back'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: textPrimary,
+                    side: const BorderSide(color: Color(0xFFCBD5E1)),
+                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  onPressed: () => Navigator.pop(context),
+                ),
+                const SizedBox(width: 14),
+                ElevatedButton.icon(
+                  icon: const Icon(Icons.refresh_rounded, size: 18),
+                  label: const Text('Retry'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: brandPrimary,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  onPressed: () {
+                    ref.invalidate(orderDetailsProvider(orderId));
+                  },
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
+
 

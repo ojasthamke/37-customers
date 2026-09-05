@@ -6,7 +6,7 @@
 
 -- 1. Add scheduling columns to areas table
 ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS preorder_enabled boolean DEFAULT true;
-ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS max_preorder_days integer DEFAULT 1;
+ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS max_preorder_days integer DEFAULT 30;
 ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS is_active_override boolean DEFAULT true;
 ALTER TABLE public.areas ADD COLUMN IF NOT EXISTS cutoff_time time DEFAULT '23:59:00';
 

@@ -73,9 +73,9 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
       debugPrint('Session refresh failed due to network or other error (ignored for offline access): $e');
     }
 
-    // Wait at most 1 second if auth state is still loading
+    // Wait for auth state to finish resolving (up to 3.5 seconds)
     int waitCount = 0;
-    while (ref.read(authProvider).isLoading && waitCount < 10) {
+    while (ref.read(authProvider).isLoading && waitCount < 35) {
       await Future.delayed(const Duration(milliseconds: 100));
       waitCount++;
       if (!mounted) return;

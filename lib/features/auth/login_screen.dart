@@ -11,6 +11,9 @@ import '../profile/legal/policy_models.dart';
 import '../profile/legal/policy_detail_screen.dart';
 import '../../core/services/auth_rate_limiter.dart';
 import '../../core/widgets/shake_widget.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'register_screen.dart';
+import 'google_onboarding_sheet.dart';
 
 // ============================================================
 // MAIN LOGIN SCREEN WITH SELECTION PANEL (LOGIN & SETUP MODES)
@@ -70,7 +73,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   }
 
   void _submit() async {
+    final code = _codeController.text.trim();
+    if (code.isNotEmpty) {
+      await AuthRateLimiter.instance.checkServerLockout(code);
+      if (!mounted) return;
+    }
     if (AuthRateLimiter.instance.isLockedOut()) {
+      setState(() {});
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(AuthRateLimiter.instance.getLockoutErrorMessage()),
@@ -135,8 +144,53 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     }
   }
 
+  Future<void> _handleGoogleSignIn() async {
+    try {
+      final customer = await ref.read(authProvider.notifier).loginWithGoogle();
+      if (!mounted) return;
+
+      if (customer != null) {
+        final isBrandNew = customer['is_brand_new'] == true;
+        final hasPassword = (customer['password']?.toString().trim().isNotEmpty ?? false);
+        final isComplete = ref.read(authProvider.notifier).isProfileComplete(customer);
+
+        if (!isBrandNew && hasPassword && isComplete) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (context) => const HomeScreen()),
+          );
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Login successful! Welcome back.'),
+              backgroundColor: Color(0xFF1B3624),
+            ),
+          );
+        } else {
+          // Mandatory onboarding: generates 7-character code, displays glassmorphism card, and sets up password
+          await GoogleOnboardingSheet.show(context, customer);
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        final cleanErr = e.toString().replaceAll('Exception: ', '').trim();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(cleanErr.isNotEmpty ? cleanErr : 'Google Sign-In failed. Please try again.'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
   void _submitSetup() async {
+    final setupCode = _setupCodeController.text.trim();
+    if (setupCode.isNotEmpty) {
+      await AuthRateLimiter.instance.checkServerLockout(setupCode);
+      if (!mounted) return;
+    }
     if (AuthRateLimiter.instance.isLockedOut()) {
+      setState(() {});
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(AuthRateLimiter.instance.getLockoutErrorMessage()),
@@ -197,8 +251,11 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       }
 
       // Step 2: Customer has no password yet -> proceed to setup password
+      final canonicalCode = (authStatus['customer_code'] as String? ?? '').trim().isNotEmpty
+          ? (authStatus['customer_code'] as String).trim()
+          : code;
       final success = await ref.read(authProvider.notifier).setupPassword(
-            code,
+            canonicalCode,
             authStatus['name'] ?? '',
             _setupPasswordController.text,
           );
@@ -738,7 +795,136 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 36),
+                const SizedBox(height: 18),
+
+                // Option C: New Customer? Create Account
+                InkWell(
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (context) => const RegisterScreen()),
+                    );
+                  },
+                  borderRadius: BorderRadius.circular(20),
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF7F5EE),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: const Color(0xFFD4AF37).withValues(alpha: 0.7), width: 1.5),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFF1B3624).withValues(alpha: 0.05),
+                          blurRadius: 10,
+                          offset: const Offset(0, 5),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.person_add_alt_1_rounded, color: Color(0xFF1B3624), size: 28),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'New Customer? Create Account',
+                                style: GoogleFonts.outfit(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  color: const Color(0xFF1B3624),
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'Register with your delivery area and route',
+                                style: GoogleFonts.inter(
+                                  fontSize: 12,
+                                  color: const Color(0xFF64748B),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const Icon(Icons.arrow_forward_ios_rounded, color: Color(0xFF1B3624), size: 16),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 18),
+
+                // Option D: Continue with Google
+                InkWell(
+                  onTap: _handleGoogleSignIn,
+                  borderRadius: BorderRadius.circular(20),
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: const Color(0xFFE2E8F0), width: 1.5),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.04),
+                          blurRadius: 10,
+                          offset: const Offset(0, 5),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 36,
+                          height: 36,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: const Color(0xFFF1F5F9),
+                            border: Border.all(color: const Color(0xFFE2E8F0)),
+                          ),
+                          child: const Center(
+                            child: Text(
+                              'G',
+                              style: TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.w900,
+                                color: Color(0xFF4285F4),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Continue with Google',
+                                style: GoogleFonts.outfit(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  color: const Color(0xFF1E293B),
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'Quick sign-in with your Google account',
+                                style: GoogleFonts.inter(
+                                  fontSize: 12,
+                                  color: const Color(0xFF64748B),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const Icon(Icons.arrow_forward_ios_rounded, color: Color(0xFF64748B), size: 16),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 32),
                 
                 // Guest option
                 GestureDetector(
@@ -1049,6 +1235,71 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                                     ),
                             ),
                           ),
+                          const SizedBox(height: 18),
+                          Row(
+                            children: [
+                              const Expanded(child: Divider(color: Color(0xFFE2E8F0))),
+                              Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 12),
+                                child: Text(
+                                  'OR',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: const Color(0xFF94A3B8),
+                                  ),
+                                ),
+                              ),
+                              const Expanded(child: Divider(color: Color(0xFFE2E8F0))),
+                            ],
+                          ),
+                          const SizedBox(height: 18),
+                          SizedBox(
+                            width: double.infinity,
+                            height: 52,
+                            child: OutlinedButton(
+                              style: OutlinedButton.styleFrom(
+                                side: const BorderSide(color: Color(0xFFE2E8F0), width: 1.5),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(16),
+                                ),
+                              ),
+                              onPressed: _handleGoogleSignIn,
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Container(
+                                    width: 24,
+                                    height: 24,
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      color: const Color(0xFFF1F5F9),
+                                      border: Border.all(color: const Color(0xFFE2E8F0)),
+                                    ),
+                                    child: const Center(
+                                      child: Text(
+                                        'G',
+                                        style: TextStyle(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w900,
+                                          color: Color(0xFF4285F4),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Text(
+                                    'Continue with Google',
+                                    style: GoogleFonts.inter(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w600,
+                                      color: const Color(0xFF1E293B),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -1301,6 +1552,31 @@ class _GuestLoginScreenState extends ConsumerState<GuestLoginScreen> {
   bool _acceptTermsGuest = false;
   bool _termsErrorGuest = false;
 
+  List<Map<String, dynamic>> _areas = [];
+  String? _selectedAreaId;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadAreas();
+  }
+
+  void _loadAreas() async {
+    try {
+      final List<dynamic> res = await Supabase.instance.client
+          .from('areas')
+          .select('id, name, area_code, delivery_schedule, cutoff_time')
+          .order('name', ascending: true);
+      if (mounted) {
+        setState(() {
+          _areas = List<Map<String, dynamic>>.from(res);
+        });
+      }
+    } catch (e) {
+      debugPrint('GuestLogin: Failed to load areas: $e');
+    }
+  }
+
   @override
   void dispose() {
     _nameController.dispose();
@@ -1333,12 +1609,32 @@ class _GuestLoginScreenState extends ConsumerState<GuestLoginScreen> {
       return;
     }
 
+    if (_selectedAreaId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please select your delivery Area.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
 
     if (_formKey.currentState!.validate()) {
+      final digits = _phoneController.text.trim().replaceAll(RegExp(r'\D'), '');
+      String address = _addressController.text.trim();
+      if (address.isEmpty || address.toUpperCase() == 'N/A') {
+        final areaObj = _areas.firstWhere((a) => a['id'] == _selectedAreaId, orElse: () => <String, dynamic>{});
+        final aName = (areaObj['name'] as String? ?? '').trim();
+        address = aName;
+      }
+
       final success = await ref.read(authProvider.notifier).registerGuest(
             name: _nameController.text.trim(),
-            phone: _phoneController.text.trim(),
-            address: _addressController.text.trim(),
+            phone: digits,
+            address: address,
+            areaId: _selectedAreaId,
+            roadId: null,
+            subRoadId: null,
           );
 
       if (!mounted) return;
@@ -1546,6 +1842,12 @@ class _GuestLoginScreenState extends ConsumerState<GuestLoginScreen> {
                         TextFormField(
                           controller: _phoneController,
                           keyboardType: TextInputType.phone,
+                          inputFormatters: [
+                            FilteringTextInputFormatter.digitsOnly,
+                            LengthLimitingTextInputFormatter(10),
+                          ],
+                          maxLength: 10,
+                          buildCounter: (context, {required currentLength, required isFocused, maxLength}) => null,
                           decoration: InputDecoration(
                             labelText: 'Phone Number',
                             prefixIcon: const Icon(Icons.phone_outlined, size: 20, color: Color(0xFF1B3624)),
@@ -1565,11 +1867,50 @@ class _GuestLoginScreenState extends ConsumerState<GuestLoginScreen> {
                             if (val == null || val.trim().isEmpty) {
                               return 'Please enter your phone number';
                             }
-                            if (val.trim().length < 10) {
-                              return 'Enter valid 10-digit number';
+                            final digits = val.trim().replaceAll(RegExp(r'\D'), '');
+                            if (digits.length != 10) {
+                              return 'Phone number must be exactly 10 digits';
+                            }
+                            if (!RegExp(r'^[6-9]\d{9}$').hasMatch(digits)) {
+                              return 'Enter a valid 10-digit phone number';
                             }
                             return null;
                           },
+                        ),
+                        const SizedBox(height: 16),
+
+                        // Area Dropdown (Road selection is omitted)
+                        DropdownButtonFormField<String>(
+                          value: _selectedAreaId,
+                          decoration: InputDecoration(
+                            labelText: 'Select Delivery Area',
+                            prefixIcon: const Icon(Icons.map_outlined, color: Color(0xFF1B3624)),
+                            filled: true,
+                            fillColor: const Color(0xFFF8FAFC),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(14),
+                              borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
+                            ),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(14),
+                              borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
+                            ),
+                          ),
+                          hint: const Text('Select Delivery Area'),
+                          items: _areas.map((a) {
+                            return DropdownMenuItem<String>(
+                              value: a['id']?.toString() ?? '',
+                              child: Text(a['name']?.toString() ?? ''),
+                            );
+                          }).toList(),
+                          onChanged: (val) {
+                            if (val != null) {
+                              setState(() {
+                                _selectedAreaId = val;
+                              });
+                            }
+                          },
+                          validator: (val) => val == null ? 'Please select an area' : null,
                         ),
                         const SizedBox(height: 16),
 

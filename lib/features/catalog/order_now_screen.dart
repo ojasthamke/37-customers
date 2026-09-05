@@ -10,6 +10,7 @@ import '../../core/widgets/quantity_selector.dart';
 import '../../core/widgets/skeleton_loader.dart';
 import '../../core/widgets/animated_slashed_text.dart';
 import '../../core/utils/string_utils.dart';
+import '../../core/utils/product_helper.dart';
 
 class OrderNowScreen extends ConsumerStatefulWidget {
   const OrderNowScreen({super.key});
@@ -276,7 +277,7 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
                 // All Products Section Title
                 Text(
                   'All Products',
-                  style: GoogleFonts.playfairDisplay(
+                  style: GoogleFonts.outfit(
                     color: const Color(0xFF1B3624),
                     fontSize: 22,
                     fontWeight: FontWeight.bold,
@@ -323,17 +324,33 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
                       );
                     }
 
+                    final availableProducts = <Map<String, dynamic>>[];
+                    final unavailableProducts = <Map<String, dynamic>>[];
+
+                    for (final p in products) {
+                      if (!ProductHelper.isOrderNowConfigured(p)) continue;
+                      final isAvailable = ProductHelper.isAvailable(p, isOrderNow: true);
+                      if (isAvailable) {
+                        availableProducts.add(p);
+                      } else {
+                        unavailableProducts.add(p);
+                      }
+                    }
+
+                    final displayList = [
+                      ...availableProducts,
+                      ...unavailableProducts,
+                    ];
+
                     return ListView.builder(
                       shrinkWrap: true,
                       physics: const NeverScrollableScrollPhysics(),
-                      itemCount: products.length,
+                      itemCount: displayList.length,
                       itemBuilder: (context, index) {
-                        final p = products[index];
-                        final double onStock = (p['order_now_stock'] as num?)?.toDouble() ?? (p['stock'] as num?)?.toDouble() ?? 0.0;
-                        final isAvailable = (p['order_now_is_available'] == null ||
-                                p['order_now_is_available'] == true ||
-                                p['order_now_is_available'] == 1) &&
-                            onStock > 0;
+                        final p = displayList[index];
+                        final isFirstUnavailable = index == availableProducts.length && unavailableProducts.isNotEmpty;
+                        final isAvailable = ProductHelper.isAvailable(p, isOrderNow: true);
+                        final bool isExplicitlyUnavailable = !isAvailable;
                         final name = p['name'] ?? '';
                         final price = (p['price'] as num?)?.toDouble() ?? 0.0;
                         final unit = p['unit'] ?? 'kg';
@@ -345,10 +362,10 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
                         final dbImageUrl = (p['image_path'] as String?) ?? (p['image_url'] as String?);
                         final imageUrl = getProductImage(name, dbImageUrl);
 
-                        final existingCartItem = cartState.items[p['id']];
+                        final existingCartItem = cartState.items[p['id']?.toString()];
                         final isInCart = existingCartItem != null;
 
-                        return GlassContainer(
+                        final card = GlassContainer(
                           margin: const EdgeInsets.only(bottom: 20),
                           borderRadius: 24,
                           padding: const EdgeInsets.all(18.0),
@@ -380,7 +397,7 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
                                       alignment: Alignment.centerLeft,
                                       child: Text(
                                         name,
-                                        style: GoogleFonts.playfairDisplay(
+                                        style: GoogleFonts.outfit(
                                           color: const Color(0xFF1B3624),
                                           fontWeight: FontWeight.bold,
                                           fontSize: 21,
@@ -594,7 +611,7 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
                                                    ],
                                                  ),
                                                  child: Text(
-                                                   'OUT OF STOCK',
+                                                   isExplicitlyUnavailable ? 'UNAVAILABLE' : 'OUT OF STOCK',
                                                    style: GoogleFonts.outfit(
                                                      color: Colors.white,
                                                      fontWeight: FontWeight.w900,
@@ -747,9 +764,10 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
                                             onPressed: () {
                                               HapticFeedback.lightImpact();
                                               final step = _getStepSize(unit);
+                                              final nextQty = ((existingCartItem.quantity - step) * 1000).round() / 1000.0;
                                               ref.read(quickCartProvider.notifier).updateQuantity(
-                                                    p['id'],
-                                                    existingCartItem.quantity - step,
+                                                    p['id'].toString(),
+                                                    nextQty,
                                                   );
                                             },
                                           ),
@@ -784,7 +802,7 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
                                               final maxStock = (p['order_now_stock'] as num?)?.toDouble() ?? (p['stock'] as num?)?.toDouble() ?? 999.0;
                                               final nextQty = ((existingCartItem.quantity + step) * 1000).round() / 1000.0;
                                               if (nextQty <= maxStock) {
-                                                ref.read(quickCartProvider.notifier).updateQuantity(p['id'], nextQty);
+                                                ref.read(quickCartProvider.notifier).updateQuantity(p['id'].toString(), nextQty);
                                               } else {
                                                 ScaffoldMessenger.of(context).showSnackBar(
                                                   SnackBar(
@@ -803,6 +821,52 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
                             ],
                           ),
                         );
+
+                        if (isFirstUnavailable) {
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Padding(
+                                padding: const EdgeInsets.only(top: 4, bottom: 16),
+                                child: Row(
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 10, vertical: 5),
+                                      decoration: BoxDecoration(
+                                        color: Colors.orange.withValues(alpha: 0.12),
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(
+                                            color: Colors.orange.withValues(alpha: 0.35)),
+                                      ),
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          const Icon(
+                                              Icons.remove_shopping_cart_rounded,
+                                              size: 14,
+                                              color: Colors.orange),
+                                          const SizedBox(width: 6),
+                                          Text(
+                                            'CURRENTLY UNAVAILABLE (${unavailableProducts.length})',
+                                            style: TextStyle(
+                                              fontSize: 11.5,
+                                              fontWeight: FontWeight.w800,
+                                              color: Colors.orange.shade800,
+                                              letterSpacing: 0.5,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              card,
+                            ],
+                          );
+                        }
+                        return card;
                       },
                     );
                   },
@@ -830,7 +894,7 @@ class _OrderNowScreenState extends ConsumerState<OrderNowScreen> {
     return GestureDetector(
       onTap: () {
         HapticFeedback.lightImpact();
-        ref.read(cartOriginTabProvider.notifier).state = 2; // NOW is the origin
+        ref.read(cartOriginTabProvider.notifier).state = 0; // Home is the origin
         ref.read(isViewingQuickOrderCartProvider.notifier).state = true;
         ref.read(activeTabProvider.notifier).state = 1; // Switch to Cart tab
       },

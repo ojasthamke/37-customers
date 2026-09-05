@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/utils/schedule_helper.dart';
 import '../auth/auth_provider.dart';
 import '../cart/cart_provider.dart';
@@ -17,6 +18,22 @@ class ScheduleBanner extends ConsumerStatefulWidget {
   @override
   ConsumerState<ScheduleBanner> createState() => _ScheduleBannerState();
 }
+
+final activeAreaScheduleProvider = FutureProvider<Map<String, dynamic>?>((ref) async {
+  try {
+    final client = Supabase.instance.client;
+    final customer = ref.watch(authProvider).customer;
+    final areaId = customer?['area_id']?.toString();
+    if (areaId != null && areaId.isNotEmpty) {
+      final res = await client.from('areas').select('delivery_schedule, cutoff_time').eq('id', areaId).maybeSingle();
+      if (res != null && res['delivery_schedule'] != null) return res;
+    }
+    final res = await client.from('areas').select('delivery_schedule, cutoff_time').limit(1).maybeSingle();
+    return res;
+  } catch (_) {
+    return null;
+  }
+});
 
 class _ScheduleBannerState extends ConsumerState<ScheduleBanner> {
   Timer? _timer;
@@ -58,7 +75,26 @@ class _ScheduleBannerState extends ConsumerState<ScheduleBanner> {
         orderDays = rawSchedule.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
       }
     }
-    final cutoffTimeStr = customer['cutoff_time']?.toString();
+
+    if (orderDays == null || orderDays.isEmpty) {
+      final fallbackSched = ref.watch(activeAreaScheduleProvider).valueOrNull;
+      if (fallbackSched != null) {
+        final raw = fallbackSched['delivery_schedule'];
+        if (raw is List) {
+          orderDays = raw;
+        } else if (raw is String && raw.trim().isNotEmpty) {
+          try {
+            final decoded = json.decode(raw);
+            if (decoded is List) orderDays = decoded;
+          } catch (_) {
+            orderDays = raw.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+          }
+        }
+      }
+    }
+
+    final cutoffTimeStr = customer['cutoff_time']?.toString() ??
+        ref.watch(activeAreaScheduleProvider).valueOrNull?['cutoff_time']?.toString();
     
     final settingsAsync = ref.watch(appSettingsProvider);
     final bool isClosed = isStoreClosed(settingsAsync.valueOrNull);

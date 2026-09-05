@@ -11,6 +11,8 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'dart:async';
 import 'dart:typed_data';
 import '../../features/order/order_details_screen.dart';
+import '../../features/dashboard/home_screen.dart';
+import '../database/database_helper.dart';
 
 const String kCustomerNotificationChannelId = 'aplibhaji_customer_channel';
 const String kCustomerNotificationChannelName = 'Orderkart Alerts';
@@ -28,6 +30,8 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
     final title = notification?.title ?? data['title'] ?? 'Orderkart Alert';
     final body = notification?.body ?? data['body'] ?? '';
     final payload = data['payload'] ?? '';
+    final eventId = data['eventId'] ?? data['event_id'];
+    final targetUserId = data['userId'] ?? data['user_id'];
 
     // If message is data-only (no OS-rendered notification block), display local notification
     if (notification == null && (title.isNotEmpty || body.isNotEmpty)) {
@@ -37,6 +41,8 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
         title: title,
         body: body,
         payload: payload,
+        eventId: eventId,
+        targetUserId: targetUserId,
       );
     }
   } catch (e) {
@@ -57,8 +63,12 @@ class NotificationService {
   Timer? _periodicSyncTimer;
   AppLifecycleListener? _lifecycleListener;
   final Set<String> _seenNotificationIds = <String>{};
+  final Set<String> _processedEventIds = <String>{};
+  final Map<String, DateTime> _recentNotificationFingerprints = <String, DateTime>{};
   bool _isSyncRunning = false;
   String? _currentCustomerId;
+  String? _currentAreaId;
+  String? _pendingPayload;
   bool _isInitialized = false;
 
   NotificationService._();
@@ -72,6 +82,9 @@ class NotificationService {
       final String timeZoneName = await FlutterTimezone.getLocalTimezone();
       tz.setLocalLocation(tz.getLocation(timeZoneName));
     } catch (_) {}
+
+    // Load persistent deduplication IDs
+    await _loadProcessedEventIds();
 
     // 1. Initialize Local Notifications & Explicitly Create High-Importance Android Channel
     await initLocalNotificationsOnly();
@@ -98,11 +111,13 @@ class NotificationService {
         sound: true,
       );
 
-      // Set presentation options for foreground display
+      // Set presentation options for foreground display:
+      // Setting alert and sound to false prevents the OS from spawning an unmanaged duplicate banner
+      // while our debounced local notification handler renders the alert cleanly and uniquely.
       await FirebaseMessaging.instance.setForegroundNotificationPresentationOptions(
-        alert: true,
+        alert: false,
         badge: true,
-        sound: true,
+        sound: false,
       );
 
       // Subscribe to general customer broadcast topic
@@ -130,30 +145,39 @@ class NotificationService {
         final title = notification?.title ?? data['title'] ?? 'Notification';
         final body = notification?.body ?? data['body'] ?? '';
         final payload = data['payload'] ?? '';
+        final eventId = data['eventId'] ?? data['event_id'];
+        final targetUserId = data['userId'] ?? data['user_id'] ?? data['target_user_id'];
+
+        final orderNoMatch = RegExp(r'#?ORD-?\d+', caseSensitive: false).firstMatch('$title $body $payload');
+        final String? orderNumber = orderNoMatch?.group(0)?.toUpperCase();
+
+        final int deterministicId = (orderNumber != null
+                ? orderNumber.hashCode
+                : '${title.trim().toLowerCase()}|${body.trim().toLowerCase()}'.hashCode) &
+            0x7FFFFFFF;
 
         showNotification(
-          id: message.messageId?.hashCode ?? DateTime.now().millisecondsSinceEpoch ~/ 1000,
+          id: deterministicId,
           title: title,
           body: body,
           payload: payload,
+          eventId: eventId,
+          targetUserId: targetUserId,
+          orderKey: orderNumber,
         );
       });
 
       // Handle FCM notification clicks when app is in background
       FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
         final payload = message.data['payload'];
-        if (payload != null && payload.isNotEmpty) {
-          _handleNotificationPayload(payload);
-        }
+        _handleNotificationPayload(payload);
       });
 
       // Handle FCM notification click when app is launched from terminated state
       FirebaseMessaging.instance.getInitialMessage().then((RemoteMessage? message) {
         if (message != null) {
           final payload = message.data['payload'];
-          if (payload != null && payload.isNotEmpty) {
-            _handleNotificationPayload(payload);
-          }
+          _handleNotificationPayload(payload);
         }
       });
 
@@ -163,11 +187,11 @@ class NotificationService {
           final client = Supabase.instance.client;
           final user = client.auth.currentUser;
           if (user != null) {
-            await client.from('customers').update({'fcm_token': newToken}).or('id.eq.${user.id},auth_user_id.eq.${user.id}');
-            debugPrint('FCM Token refreshed and updated in DB: $newToken');
+            await registerFCMToken(user.id, explicitToken: newToken);
+            debugPrint('FCM Token refreshed and registered: $newToken');
           }
         } catch (err) {
-          debugPrint('Error saving refreshed FCM token to DB: $err');
+          debugPrint('Error saving refreshed FCM token: $err');
         }
       });
 
@@ -177,8 +201,24 @@ class NotificationService {
   }
 
   /// Starts real-time database listener, persistent storage, and background polling
-  Future<void> startRealtimeNotificationSync({String? customerId}) async {
+  Future<void> startRealtimeNotificationSync({String? customerId, String? areaId}) async {
     _currentCustomerId = customerId;
+    if (areaId != null && areaId.isNotEmpty) {
+      _currentAreaId = areaId;
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('aplibhaji_customer_area_id', areaId);
+        final cleanAreaTopic = 'area_${areaId.replaceAll('-', '_')}';
+        await FirebaseMessaging.instance.subscribeToTopic(cleanAreaTopic);
+        debugPrint('Subscribed to area topic: $cleanAreaTopic');
+      } catch (_) {}
+    } else {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        _currentAreaId ??= prefs.getString('aplibhaji_customer_area_id');
+      } catch (_) {}
+    }
+
     await _loadSeenIdsFromStorage();
 
     // 1. Immediate sync on startup or customer switch
@@ -237,7 +277,9 @@ class NotificationService {
         table: 'notifications',
         callback: (payload) {
           final newRecord = payload.newRecord;
-          _processNotificationRecord(newRecord, customerId: _currentCustomerId, showPopup: true);
+          // Synchronize database records for in-app inbox without popping duplicate OS tray banner
+          // (FCM is the single authoritative driver for OS system-tray notifications)
+          _processNotificationRecord(newRecord, customerId: _currentCustomerId, showPopup: false);
         },
       );
       _realtimeChannel?.subscribe();
@@ -277,6 +319,8 @@ class NotificationService {
     if (_seenNotificationIds.contains(id)) return;
 
     final targetCustId = record['customer_id']?.toString();
+    final targetAreaId = record['area_id']?.toString();
+    final targetType = record['target_type']?.toString() ?? 'broadcast';
     final title = record['title']?.toString() ?? 'ApliBhaji Notification';
     final body = record['body']?.toString() ?? '';
     final createdAtStr = record['created_at']?.toString();
@@ -294,25 +338,41 @@ class NotificationService {
       }
     }
 
-    // Match if broadcast (null / empty) or targeted to this customer
-    final bool isTargeted = targetCustId == null ||
-        targetCustId.isEmpty ||
-        (customerId != null && targetCustId == customerId);
+    // Accurate targeting validation:
+    // 1. If targeted to a specific customer, match current customer ID
+    // 2. If targeted to an area, match current customer area ID
+    // 3. If broadcast, match all
+    bool isTargeted = false;
+    if (targetCustId != null && targetCustId.isNotEmpty) {
+      isTargeted = (customerId != null && targetCustId == customerId);
+    } else if (targetAreaId != null && targetAreaId.isNotEmpty) {
+      isTargeted = (_currentAreaId != null && targetAreaId == _currentAreaId);
+    } else {
+      isTargeted = (targetType == 'broadcast' || targetType.isEmpty);
+    }
 
     if (isTargeted) {
       _seenNotificationIds.add(id);
       await _persistSeenId(id);
 
       if (showPopup) {
-        final orderNoMatch = RegExp(r'#ORD-\d+').firstMatch('$title $body');
-        final String? orderNumber = orderNoMatch?.group(0);
-        final String payload = orderNumber != null ? 'order_$orderNumber' : 'promo_$id';
+        final orderNoMatch = RegExp(r'#?ORD-?\d+', caseSensitive: false).firstMatch('$title $body');
+        final String? orderNumber = orderNoMatch?.group(0)?.toUpperCase();
+        final String payload = orderNumber != null ? 'order_$orderNumber' : (record['payload']?.toString() ?? 'notif_$id');
+
+        final int deterministicId = (orderNumber != null
+                ? orderNumber.hashCode
+                : '${title.trim().toLowerCase()}|${body.trim().toLowerCase()}'.hashCode) &
+            0x7FFFFFFF;
 
         await showNotification(
-          id: id.hashCode,
+          id: deterministicId,
           title: title,
           body: body,
           payload: payload,
+          eventId: 'notif_$id',
+          targetUserId: targetCustId,
+          orderKey: orderNumber,
         );
       }
     }
@@ -357,11 +417,23 @@ class NotificationService {
   }
 
   // Register FCM Token for the authenticated customer
-  Future<void> registerFCMToken(String userId) async {
+  Future<void> registerFCMToken(String userId, {String? explicitToken}) async {
     try {
-      final fcmToken = await FirebaseMessaging.instance.getToken();
-      if (fcmToken != null) {
+      final fcmToken = explicitToken ?? await FirebaseMessaging.instance.getToken();
+      if (fcmToken != null && fcmToken.isNotEmpty) {
         final client = Supabase.instance.client;
+
+        // 1. Multi-device support: Register in device_tokens table
+        try {
+          await client.rpc('register_device_token', params: {
+            'p_token': fcmToken,
+            'p_role': 'customer',
+            'p_device_type': 'android',
+            'p_device_name': 'Customer Device',
+          });
+        } catch (_) {}
+
+        // 2. Legacy backwards compatibility sync
         await client.from('customers').update({'fcm_token': fcmToken}).or('id.eq.$userId,auth_user_id.eq.$userId');
         debugPrint('FCM Token registered and updated in DB: $fcmToken');
       }
@@ -370,10 +442,37 @@ class NotificationService {
     }
   }
 
+  // Stop all sync timers, realtime channels, and clear cached customer context on logout
+  void stopSync() {
+    _periodicSyncTimer?.cancel();
+    _periodicSyncTimer = null;
+    _lifecycleListener?.dispose();
+    _lifecycleListener = null;
+    try {
+      if (_realtimeChannel != null) {
+        Supabase.instance.client.removeChannel(_realtimeChannel!);
+        _realtimeChannel = null;
+      }
+    } catch (_) {}
+    if (_currentAreaId != null && _currentAreaId!.isNotEmpty) {
+      final cleanTopic = _currentAreaId!.replaceAll(RegExp(r'[^a-zA-Z0-9-_.~%]'), '_');
+      FirebaseMessaging.instance.unsubscribeFromTopic('area_$cleanTopic').catchError((_) {});
+    }
+    _currentCustomerId = null;
+    _currentAreaId = null;
+  }
+
   // Clear FCM Token for the customer on logout
   Future<void> clearFCMToken(String userId) async {
+    stopSync();
     try {
+      final fcmToken = await FirebaseMessaging.instance.getToken();
       final client = Supabase.instance.client;
+      if (fcmToken != null) {
+        try {
+          await client.rpc('delete_device_token', params: {'p_token': fcmToken});
+        } catch (_) {}
+      }
       await client.from('customers').update({'fcm_token': null}).or('id.eq.$userId,auth_user_id.eq.$userId');
       debugPrint('FCM Token cleared in DB for user: $userId');
     } catch (e) {
@@ -381,46 +480,175 @@ class NotificationService {
     }
   }
 
+  Future<void> _loadProcessedEventIds() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final list = prefs.getStringList('aplibhaji_processed_event_ids');
+      if (list != null) {
+        _processedEventIds.addAll(list);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _persistProcessedEventId(String eventId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      _processedEventIds.add(eventId);
+      if (_processedEventIds.length > 300) {
+        final list = _processedEventIds.toList();
+        _processedEventIds.clear();
+        _processedEventIds.addAll(list.skip(list.length - 150));
+      }
+      await prefs.setStringList('aplibhaji_processed_event_ids', _processedEventIds.toList());
+    } catch (_) {}
+  }
+
   void _onSelectNotification(NotificationResponse response) {
     final payload = response.payload;
-    if (payload == null || payload.isEmpty) return;
     _handleNotificationPayload(payload);
   }
 
-  void _handleNotificationPayload(String payload) async {
-    // Check if payload is directly a UUID (orderId)
-    if (RegExp(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$').hasMatch(payload)) {
-      navigatorKey.currentState?.push(
-        MaterialPageRoute(
-          builder: (context) => OrderDetailsScreen(orderId: payload),
-        ),
-      );
+  void _navigateToHome() {
+    try {
+      final nav = navigatorKey.currentState;
+      if (nav != null) {
+        nav.pushAndRemoveUntil(
+          MaterialPageRoute(builder: (context) => const HomeScreen()),
+          (route) => false,
+        );
+      }
+    } catch (e) {
+      debugPrint('Failed to navigate to Home: $e');
+    }
+  }
+
+  void _handleNotificationPayload(String? payload) {
+    if (navigatorKey.currentState == null) {
+      _pendingPayload = payload;
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        for (int i = 0; i < 20; i++) {
+          if (navigatorKey.currentState != null) {
+            final p = _pendingPayload;
+            _pendingPayload = null;
+            _processPayloadNavigation(p);
+            break;
+          }
+          await Future.delayed(const Duration(milliseconds: 100));
+        }
+      });
       return;
     }
 
-    // Otherwise check for order number payload (starts with order_)
-    if (payload.startsWith('order_')) {
-      final orderNo = payload.substring(6);
-      try {
-        final client = Supabase.instance.client;
-        final res = await client
-            .from('orders')
-            .select('id')
-            .eq('order_number', orderNo)
-            .maybeSingle();
-        if (res != null) {
-          final orderId = res['id'] as String?;
-          if (orderId != null) {
-            navigatorKey.currentState?.push(
-              MaterialPageRoute(
-                builder: (context) => OrderDetailsScreen(orderId: orderId),
-              ),
-            );
-          }
-        }
-      } catch (e) {
-        debugPrint('Failed to fetch order ID for payload: $e');
+    _processPayloadNavigation(payload);
+  }
+
+  Future<void> _processPayloadNavigation(String? payload) async {
+    final cleanPayload = payload?.trim() ?? '';
+
+    // 1. If payload is empty or not order-related -> Open Customer Home Screen
+    if (cleanPayload.isEmpty ||
+        cleanPayload == 'home' ||
+        cleanPayload.startsWith('promo_') ||
+        cleanPayload.startsWith('broadcast_') ||
+        cleanPayload.startsWith('notif_')) {
+      _navigateToHome();
+      return;
+    }
+
+    // 2. Extract potential Order ID or Order Number
+    String? orderIdOrNo;
+    if (cleanPayload.startsWith('order_')) {
+      orderIdOrNo = cleanPayload.substring(6).trim();
+    } else if (RegExp(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$').hasMatch(cleanPayload)) {
+      orderIdOrNo = cleanPayload;
+    } else if (RegExp(r'^#?ORD-?\d+$', caseSensitive: false).hasMatch(cleanPayload)) {
+      orderIdOrNo = cleanPayload;
+    }
+
+    // If payload was not an order reference (e.g. malformed or general text) -> Open Home Screen
+    if (orderIdOrNo == null || orderIdOrNo.isEmpty) {
+      _navigateToHome();
+      return;
+    }
+
+    // 3. Security & Ownership Verification:
+    try {
+      final client = Supabase.instance.client;
+      final currentUser = client.auth.currentUser;
+      final currentUserId = currentUser?.id ?? _currentCustomerId;
+
+      // Unauthenticated user -> cannot view order details -> safely route to Home
+      if (currentUserId == null) {
+        _navigateToHome();
+        return;
       }
+
+      final isUuid = RegExp(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$').hasMatch(orderIdOrNo);
+      
+      Map<String, dynamic>? orderRow;
+      try {
+        final query = client.from('orders').select('id, customer_id, customer_phone, order_number');
+        final res = isUuid 
+            ? await query.eq('id', orderIdOrNo).maybeSingle()
+            : await query.eq('order_number', orderIdOrNo).maybeSingle();
+        orderRow = res;
+      } catch (e) {
+        debugPrint('Remote order query for notification tap failed, fallback to local: $e');
+      }
+
+      // If remote failed or returned null, check local SQLite
+      if (orderRow == null) {
+        try {
+          final db = await DatabaseHelper.instance.database;
+          final localRes = isUuid
+              ? await db.query('orders', where: 'id = ?', whereArgs: [orderIdOrNo], limit: 1)
+              : await db.query('orders', where: 'order_number = ?', whereArgs: [orderIdOrNo], limit: 1);
+          if (localRes.isNotEmpty) {
+            orderRow = localRes.first;
+          }
+        } catch (_) {}
+      }
+
+      // If order does not exist anywhere -> Open Home Screen safely
+      if (orderRow == null) {
+        debugPrint('Order not found for notification tap: $orderIdOrNo');
+        _navigateToHome();
+        return;
+      }
+
+      final orderCustId = orderRow['customer_id']?.toString();
+      final targetOrderId = orderRow['id']?.toString();
+
+      // SECURITY BOUNDARY: Verify that the current user owns this order
+      if (orderCustId != null && orderCustId != currentUserId) {
+        debugPrint('SECURITY ALERT: User $currentUserId attempted to open Order $targetOrderId owned by $orderCustId');
+        final context = navigatorKey.currentContext;
+        if (context != null && context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Access Denied: You do not have permission to view this order.'),
+              backgroundColor: Colors.redAccent,
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+        _navigateToHome();
+        return;
+      }
+
+      // Valid & Owned Order -> Navigate directly to OrderDetailsScreen!
+      if (targetOrderId != null && targetOrderId.isNotEmpty) {
+        navigatorKey.currentState?.push(
+          MaterialPageRoute(
+            builder: (context) => OrderDetailsScreen(orderId: targetOrderId),
+          ),
+        );
+      } else {
+        _navigateToHome();
+      }
+    } catch (e) {
+      debugPrint('Error navigating to order details from notification: $e');
+      _navigateToHome();
     }
   }
 
@@ -429,16 +657,65 @@ class NotificationService {
     required String title,
     required String body,
     String? payload,
+    String? eventId,
+    String? targetUserId,
+    String? orderKey,
     bool playSound = true,
     bool enableVibration = true,
   }) async {
-    final AndroidNotificationDetails androidDetails =
-        AndroidNotificationDetails(
+    final String cleanTitle = title.trim();
+    final String cleanBody = body.trim();
+
+    // 1. Account Switch Protection:
+    try {
+      final client = Supabase.instance.client;
+      final currentUserId = client.auth.currentUser?.id ?? _currentCustomerId;
+      if (targetUserId != null && targetUserId.isNotEmpty && currentUserId != null) {
+        if (targetUserId != currentUserId) {
+          debugPrint('NotificationService: Suppressed notification intended for user $targetUserId (current: $currentUserId)');
+          return;
+        }
+      }
+    } catch (_) {}
+
+    // 2. Stable Event ID Extraction:
+    final String stableEventId = (eventId != null && eventId.isNotEmpty)
+        ? eventId
+        : (orderKey != null && orderKey.isNotEmpty)
+            ? 'order_${orderKey.toUpperCase()}_${cleanTitle.toLowerCase()}'
+            : '${cleanTitle.toLowerCase()}|${cleanBody.toLowerCase()}';
+
+    // 3. Persistent Event Deduplication:
+    if (_processedEventIds.contains(stableEventId)) {
+      debugPrint('NotificationService: Suppressed duplicate eventId "$stableEventId".');
+      return;
+    }
+    await _persistProcessedEventId(stableEventId);
+
+    // 4. Memory Fingerprint Debounce (prevents rapid re-trigger of identical text within 4s)
+    final now = DateTime.now();
+    final lastSeen = _recentNotificationFingerprints[stableEventId];
+    if (lastSeen != null && now.difference(lastSeen).inSeconds < 4) {
+      debugPrint('NotificationService: Suppressed rapid bounce for key "$stableEventId".');
+      return;
+    }
+    _recentNotificationFingerprints[stableEventId] = now;
+
+    // Prune stale fingerprints
+    if (_recentNotificationFingerprints.length > 100) {
+      _recentNotificationFingerprints.removeWhere((k, time) => now.difference(time).inMinutes > 5);
+    }
+
+    // 5. Deterministic Notification ID:
+    final int deterministicId = (stableEventId.hashCode & 0x7FFFFFFF);
+
+    final AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
       kCustomerNotificationChannelId,
       kCustomerNotificationChannelName,
       channelDescription: kCustomerNotificationChannelDesc,
       importance: Importance.max,
       priority: Priority.high,
+      tag: stableEventId,
       playSound: playSound,
       enableVibration: enableVibration,
       visibility: NotificationVisibility.public,
@@ -450,7 +727,12 @@ class NotificationService {
     final NotificationDetails platformDetails =
         NotificationDetails(android: androidDetails);
 
-    await flutterLocalNotificationsPlugin.show(id, title, body, platformDetails,
-        payload: payload);
+    await flutterLocalNotificationsPlugin.show(
+      deterministicId,
+      cleanTitle,
+      cleanBody,
+      platformDetails,
+      payload: payload,
+    );
   }
 }

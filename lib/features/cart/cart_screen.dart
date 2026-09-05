@@ -7,6 +7,7 @@ import '../catalog/catalog_provider.dart';
 import '../checkout/checkout_screen.dart';
 import '../../core/widgets/ambient_background.dart';
 import '../../core/utils/string_utils.dart';
+import '../../core/utils/product_helper.dart';
 
 String _formatCurrency(double amount) {
   if ((amount - amount.roundToDouble()).abs() < 0.01) {
@@ -33,6 +34,35 @@ class _CartScreenState extends ConsumerState<CartScreen> {
   void _deleteItem(String productId) {
     HapticFeedback.lightImpact();
     ref.read(activeCartNotifierProvider).removeItem(productId);
+  }
+
+  void _readjustAllExcess(WidgetRef ref, CartState cart, List<Map<String, dynamic>> allProducts) {
+    int count = 0;
+    for (final item in cart.items.values) {
+      final matching = allProducts.firstWhere(
+        (p) => p['id']?.toString().trim().toLowerCase() == item.productId.trim().toLowerCase(),
+        orElse: () => <String, dynamic>{},
+      );
+      if (matching.isNotEmpty) {
+        final rawSt = item.isOrderNow ? matching['order_now_stock'] : matching['stock'];
+        final double? st = (rawSt is num) ? rawSt.toDouble() : double.tryParse(rawSt?.toString() ?? '');
+        if (st != null && st > 0 && item.quantity > st) {
+          ref.read(activeCartNotifierProvider).updateQuantity(item.productId, st);
+          count++;
+        }
+      }
+    }
+    if (count > 0) {
+      HapticFeedback.mediumImpact();
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Readjusted $count item(s) to maximum available stock. Please review before proceeding.'),
+          backgroundColor: const Color(0xFFD97706),
+          duration: const Duration(seconds: 4),
+        ),
+      );
+    }
   }
 
   void _showRoundingExplanation(BuildContext context, double roundingDiff, double baseCharge) {
@@ -98,62 +128,34 @@ class _CartScreenState extends ConsumerState<CartScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final isQuick = ref.watch(isViewingQuickOrderCartProvider);
-    final settingsAsync = ref.watch(appSettingsProvider);
-    final isQuickOrderClosed = isOrderNowClosed(settingsAsync.valueOrNull);
-
-    final normalCart = ref.watch(cartProvider);
-    final quickCart = ref.watch(quickCartProvider);
-    final int normalItemCount = normalCart.items.length;
-    final int quickItemCount = quickCart.items.length;
-
-    final toggleSelector = _GlassSlidingCartToggle(
-      isQuick: isQuick,
-      isQuickOrderClosed: isQuickOrderClosed,
-      normalItemCount: normalItemCount,
-      quickItemCount: quickItemCount,
-      onNormalTap: () {
-        HapticFeedback.lightImpact();
-        ref.read(isViewingQuickOrderCartProvider.notifier).state = false;
-      },
-      onQuickTap: () {
-        HapticFeedback.lightImpact();
-        ref.read(isViewingQuickOrderCartProvider.notifier).state = true;
-      },
-    );
-
-
     final cart = ref.watch(activeCartProvider);
     final settings = ref.watch(appSettingsProvider).valueOrNull;
     final bool isClosed = isStoreClosed(settings);
 
     final allProducts = ref.watch(allProductsProvider).valueOrNull ?? [];
     bool hasStockOutItems = false;
-    for (final it in cart.items.values) {
-      final matching = allProducts.firstWhere(
-        (p) => p['id']?.toString() == it.productId,
-        orElse: () => <String, dynamic>{},
-      );
-      if (matching.isNotEmpty) {
-        final double st = it.isOrderNow
-            ? ((matching['order_now_stock'] as num?)?.toDouble() ?? 0.0)
-            : ((matching['stock'] as num?)?.toDouble() ?? 0.0);
-        final bool avail = it.isOrderNow
-            ? ((matching['order_now_is_available'] == null ||
-                matching['order_now_is_available'] == true ||
-                matching['order_now_is_available'] == 1) &&
-               (matching['is_enabled'] == null ||
-                matching['is_enabled'] == true ||
-                matching['is_enabled'] == 1) &&
-               st > 0)
-            : ((matching['is_available'] == true || matching['is_available'] == 1) &&
-               (matching['is_enabled'] == null ||
-                matching['is_enabled'] == true ||
-                matching['is_enabled'] == 1) &&
-               st > 0);
+    bool hasExcessQuantityItems = false;
+
+    // SAFEGUARD: If catalog is still loading or empty, do NOT falsely flag items as out-of-stock!
+    if (allProducts.isNotEmpty) {
+      for (final it in cart.items.values) {
+        final matching = allProducts.firstWhere(
+          (p) => p['id']?.toString().trim().toLowerCase() == it.productId.trim().toLowerCase(),
+          orElse: () => <String, dynamic>{},
+        );
+        if (matching.isEmpty) {
+          // If product metadata is still streaming or not yet matched, keep existing cart item available
+          continue;
+        }
+
+        final bool isOrderNow = it.isOrderNow;
+        final double st = ProductHelper.getStock(matching, isOrderNow: isOrderNow);
+        final bool avail = ProductHelper.isAvailable(matching, isOrderNow: isOrderNow);
+
         if (!avail) {
           hasStockOutItems = true;
-          break;
+        } else if (st > 0 && it.quantity > st) {
+          hasExcessQuantityItems = true;
         }
       }
     }
@@ -169,7 +171,6 @@ class _CartScreenState extends ConsumerState<CartScreen> {
     if (cart.items.isEmpty) {
       content = Column(
         children: [
-          toggleSelector,
           Expanded(
             child: Center(
               child: Padding(
@@ -224,7 +225,6 @@ class _CartScreenState extends ConsumerState<CartScreen> {
     } else {
       content = Column(
         children: [
-          toggleSelector,
           if (hasStockOutItems)
             Container(
               margin: const EdgeInsets.fromLTRB(16, 10, 16, 4),
@@ -255,6 +255,64 @@ class _CartScreenState extends ConsumerState<CartScreen> {
                         height: 1.3,
                       ),
                     ),
+                  ),
+                ],
+              ),
+            ),
+          if (hasExcessQuantityItems)
+            Container(
+              margin: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFFBEB),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: const Color(0xFFF59E0B)),
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFFF59E0B).withValues(alpha: 0.15),
+                    blurRadius: 10,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.tune_rounded, color: Color(0xFFD97706), size: 22),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Items exceed available store stock',
+                          style: GoogleFonts.inter(
+                            color: const Color(0xFF92400E),
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        Text(
+                          'Some items have more quantity than available in store.',
+                          style: GoogleFonts.inter(
+                            color: const Color(0xFF78350F),
+                            fontSize: 11.5,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFD97706),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      minimumSize: Size.zero,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                    onPressed: () => _readjustAllExcess(ref, cart, allProducts),
+                    child: const Text('Readjust All', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.bold)),
                   ),
                 ],
               ),
@@ -294,7 +352,7 @@ class _CartScreenState extends ConsumerState<CartScreen> {
               itemBuilder: (context, index) {
                 final item = cart.items.values.toList()[index];
                 return _CartItemTile(
-                  key: ValueKey('${item.productId}_${isQuick ? "q" : "n"}'),
+                  key: ValueKey(item.productId),
                   item: item,
                   onDelete: () => _deleteItem(item.productId),
                   onCustomSize: () => _showCustomSizeDialog(context, ref, item),
@@ -363,7 +421,8 @@ class _CartScreenState extends ConsumerState<CartScreen> {
                             fontSize: 15,
                           ),
                         ),
-                        if (cart.roundingDifference > 0.001) ...[
+                        // Show info icon only when rounding is folded INTO delivery fee
+                        if (cart.baseDeliveryCharge > 0 && cart.roundingDifference > 0.001) ...[
                           const SizedBox(width: 4),
                           GestureDetector(
                             onTap: () {
@@ -392,6 +451,49 @@ class _CartScreenState extends ConsumerState<CartScreen> {
                     ),
                   ],
                 ),
+                // Show separate Round-off row when delivery is free but rounding applies
+                if (cart.separateRoundingAdjustment > 0.001) ...[
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Row(
+                        children: [
+                          Text(
+                            'Round-off',
+                            style: GoogleFonts.inter(
+                              color: textColorPrimary.withValues(alpha: 0.8),
+                              fontSize: 15,
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          GestureDetector(
+                            onTap: () {
+                              _showRoundingExplanation(
+                                context,
+                                cart.separateRoundingAdjustment,
+                                0.0,
+                              );
+                            },
+                            child: Icon(
+                              Icons.info_outline_rounded,
+                              size: 16,
+                              color: textColorPrimary.withValues(alpha: 0.5),
+                            ),
+                          ),
+                        ],
+                      ),
+                      Text(
+                        '₹${_formatCurrency(cart.separateRoundingAdjustment)}',
+                        style: GoogleFonts.inter(
+                          fontWeight: FontWeight.w600,
+                          color: textColorPrimary,
+                          fontSize: 15,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
                 const SizedBox(height: 12),
                 const Divider(color: borderPillColor, height: 1),
                 const SizedBox(height: 16),
@@ -422,17 +524,19 @@ class _CartScreenState extends ConsumerState<CartScreen> {
                 // Checkout Button
                 Builder(
                   builder: (context) {
-                    final bool isCheckoutBlocked = isClosed || (isQuick && isQuickOrderClosed);
+                    final bool isCheckoutBlocked = isClosed;
                     return SizedBox(
                       width: double.infinity,
                       height: 56,
                       child: ElevatedButton(
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: (isCheckoutBlocked || hasStockOutItems)
+                          backgroundColor: isCheckoutBlocked
                               ? const Color(0xFF94A3B8)
-                              : textColorPrimary,
+                              : (hasStockOutItems
+                                  ? const Color(0xFF94A3B8)
+                                  : (hasExcessQuantityItems ? const Color(0xFFD97706) : textColorPrimary)),
                           foregroundColor: Colors.white,
-                          elevation: hasStockOutItems ? 4 : 0,
+                          elevation: (hasStockOutItems || hasExcessQuantityItems) ? 4 : 0,
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(28),
                           ),
@@ -459,32 +563,36 @@ class _CartScreenState extends ConsumerState<CartScreen> {
                                       ),
                                     );
                                   }
-                                : () {
-                                    Navigator.push(
-                                      context,
-                                      PageRouteBuilder(
-                                        pageBuilder: (context, animation, secondaryAnimation) => const CheckoutScreen(),
-                                        transitionsBuilder: (context, animation, secondaryAnimation, child) {
-                                          final tween = Tween(begin: const Offset(1.0, 0.0), end: Offset.zero)
-                                              .chain(CurveTween(curve: Curves.easeInOutCubic));
-                                          return SlideTransition(
-                                            position: animation.drive(tween),
-                                            child: child,
-                                          );
-                                        },
-                                        transitionDuration: const Duration(milliseconds: 350),
-                                      ),
-                                    );
-                                  }),
+                                : (hasExcessQuantityItems
+                                    ? () {
+                                        _readjustAllExcess(ref, cart, allProducts);
+                                      }
+                                    : () {
+                                        Navigator.push(
+                                          context,
+                                          PageRouteBuilder(
+                                            pageBuilder: (context, animation, secondaryAnimation) => const CheckoutScreen(),
+                                            transitionsBuilder: (context, animation, secondaryAnimation, child) {
+                                              final tween = Tween(begin: const Offset(1.0, 0.0), end: Offset.zero)
+                                                  .chain(CurveTween(curve: Curves.easeInOutCubic));
+                                              return SlideTransition(
+                                                position: animation.drive(tween),
+                                                child: child,
+                                              );
+                                            },
+                                            transitionDuration: const Duration(milliseconds: 350),
+                                          ),
+                                        );
+                                      })),
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Text(
                               isClosed
                                   ? 'Store is Closed'
-                                  : (isQuick && isQuickOrderClosed
-                                      ? 'Quick Order is Closed'
-                                      : (hasStockOutItems ? 'Remove Out-of-Stock Items' : 'Proceed to Checkout')),
+                                  : (hasStockOutItems
+                                      ? 'Remove Out-of-Stock Items'
+                                      : (hasExcessQuantityItems ? 'Readjust Quantities to Continue' : 'Proceed to Checkout')),
                               style: GoogleFonts.inter(
                                 fontSize: 16,
                                 fontWeight: FontWeight.bold,
@@ -494,7 +602,9 @@ class _CartScreenState extends ConsumerState<CartScreen> {
                             Icon(
                               isCheckoutBlocked
                                   ? Icons.lock_outline_rounded
-                                  : (hasStockOutItems ? Icons.warning_amber_rounded : Icons.arrow_forward_rounded),
+                                  : (hasStockOutItems
+                                      ? Icons.warning_amber_rounded
+                                      : (hasExcessQuantityItems ? Icons.tune_rounded : Icons.arrow_forward_rounded)),
                               size: 20,
                             ),
                           ],
@@ -553,7 +663,7 @@ class _CartScreenState extends ConsumerState<CartScreen> {
   void _showCustomSizeDialog(BuildContext context, WidgetRef ref, CartItem item) {
     final allProducts = ref.read(allProductsProvider).valueOrNull ?? [];
     final matchingProduct = allProducts.firstWhere(
-      (p) => p['id']?.toString() == item.productId,
+      (p) => p['id']?.toString().trim().toLowerCase() == item.productId.trim().toLowerCase(),
       orElse: () => <String, dynamic>{},
     );
     showDialog(
@@ -615,30 +725,18 @@ class _CartItemTile extends ConsumerWidget {
 
     final allProducts = ref.watch(allProductsProvider).valueOrNull ?? [];
     final matchingProduct = allProducts.firstWhere(
-      (p) => p['id']?.toString() == item.productId,
+      (p) => p['id']?.toString().trim().toLowerCase() == item.productId.trim().toLowerCase(),
       orElse: () => <String, dynamic>{},
     );
 
     final bool isOrderNow = item.isOrderNow;
-    final double availableStock = isOrderNow
-        ? ((matchingProduct['order_now_stock'] as num?)?.toDouble() ?? 0.0)
-        : ((matchingProduct['stock'] as num?)?.toDouble() ?? 0.0);
+    final double availableStock = ProductHelper.getStock(matchingProduct, isOrderNow: isOrderNow);
+    final bool isAvail = ProductHelper.isAvailable(matchingProduct, isOrderNow: isOrderNow);
 
-    final bool isAvailable = isOrderNow
-        ? ((matchingProduct['order_now_is_available'] == null ||
-            matchingProduct['order_now_is_available'] == true ||
-            matchingProduct['order_now_is_available'] == 1) &&
-           (matchingProduct['is_enabled'] == null ||
-            matchingProduct['is_enabled'] == true ||
-            matchingProduct['is_enabled'] == 1) &&
-           availableStock > 0)
-        : ((matchingProduct['is_available'] == true || matchingProduct['is_available'] == 1) &&
-           (matchingProduct['is_enabled'] == null ||
-            matchingProduct['is_enabled'] == true ||
-            matchingProduct['is_enabled'] == 1) &&
-           availableStock > 0);
+    // Declare out of stock if unavailable, disabled, or stock <= 0
+    final bool isStockOut = matchingProduct.isEmpty ? false : !isAvail;
 
-    final bool isStockOut = matchingProduct.isNotEmpty && !isAvailable;
+    final bool isExcess = !isStockOut && availableStock > 0 && item.quantity > availableStock;
 
     final String? liveImagePath = matchingProduct['image_path'] as String? ?? matchingProduct['image_url'] as String?;
     final String? imageSource = (liveImagePath != null && liveImagePath.trim().isNotEmpty)
@@ -667,11 +765,11 @@ class _CartItemTile extends ConsumerWidget {
       child: Container(
         margin: const EdgeInsets.only(bottom: 12),
         decoration: BoxDecoration(
-          color: isStockOut ? const Color(0xFFFFF5F5) : const Color(0xFFFFFFFF),
+          color: isStockOut ? const Color(0xFFFFF5F5) : (isExcess ? const Color(0xFFFFFDF8) : const Color(0xFFFFFFFF)),
           borderRadius: BorderRadius.circular(18),
           border: Border.all(
-            color: isStockOut ? const Color(0xFFEF4444) : borderPillColor,
-            width: isStockOut ? 1.8 : 1.0,
+            color: isStockOut ? const Color(0xFFEF4444) : (isExcess ? const Color(0xFFF59E0B) : borderPillColor),
+            width: (isStockOut || isExcess) ? 1.8 : 1.0,
           ),
           boxShadow: isStockOut
               ? [
@@ -687,13 +785,22 @@ class _CartItemTile extends ConsumerWidget {
                     offset: Offset.zero,
                   ),
                 ]
-              : [
-                  BoxShadow(
-                    color: const Color(0xFF0F172A).withValues(alpha: 0.03),
-                    blurRadius: 8,
-                    offset: const Offset(0, 2),
-                  ),
-                ],
+              : (isExcess
+                  ? [
+                      BoxShadow(
+                        color: const Color(0xFFF59E0B).withValues(alpha: 0.18),
+                        blurRadius: 12,
+                        spreadRadius: 1,
+                        offset: const Offset(0, 3),
+                      ),
+                    ]
+                  : [
+                      BoxShadow(
+                        color: const Color(0xFF0F172A).withValues(alpha: 0.03),
+                        blurRadius: 8,
+                        offset: const Offset(0, 2),
+                      ),
+                    ]),
         ),
         child: Padding(
           padding: const EdgeInsets.all(14.0),
@@ -727,6 +834,63 @@ class _CartItemTile extends ConsumerWidget {
                           fontWeight: FontWeight.w900,
                           fontSize: 10.5,
                           letterSpacing: 0.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              else if (isExcess)
+                Container(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFFBEB),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xFFF59E0B)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.warning_amber_rounded, size: 16, color: Color(0xFFD97706)),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          'Only ${_formatQuantity(availableStock, item.unit)} available in stock.',
+                          style: GoogleFonts.inter(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: const Color(0xFF92400E),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      InkWell(
+                        onTap: () {
+                          HapticFeedback.lightImpact();
+                          ref.read(activeCartNotifierProvider).updateQuantity(item.productId, availableStock);
+                          ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text('Adjusted ${item.productName} to available stock (${_formatQuantity(availableStock, item.unit)}).'),
+                              backgroundColor: const Color(0xFF059669),
+                              duration: const Duration(seconds: 3),
+                            ),
+                          );
+                        },
+                        borderRadius: BorderRadius.circular(6),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFD97706),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            'Readjust',
+                            style: GoogleFonts.inter(
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                          ),
                         ),
                       ),
                     ],
@@ -902,7 +1066,7 @@ class _CartItemTile extends ConsumerWidget {
                                       onPressed: () {
                                         HapticFeedback.lightImpact();
                                         final step = _getStepSize(item.unit);
-                                        final nextQty = item.quantity - step;
+                                        final nextQty = ((item.quantity - step) * 1000).round() / 1000.0;
                                         if (nextQty <= 0) {
                                           onDelete();
                                         } else {
@@ -922,15 +1086,45 @@ class _CartItemTile extends ConsumerWidget {
                                       ),
                                     ),
                                     IconButton(
-                                      icon: const Icon(Icons.add_rounded, color: textColorSecondary, size: 14),
-                                      padding: EdgeInsets.zero,
-                                      constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-                                      onPressed: () {
-                                        HapticFeedback.lightImpact();
-                                        final step = _getStepSize(item.unit);
-                                        ref.read(activeCartNotifierProvider).updateQuantity(item.productId, item.quantity + step);
-                                      },
-                                    ),
+                                       icon: Icon(
+                                         Icons.add_rounded,
+                                         color: (availableStock > 0 && item.quantity >= availableStock)
+                                             ? textColorSecondary.withValues(alpha: 0.3)
+                                             : textColorSecondary,
+                                         size: 14,
+                                       ),
+                                       padding: EdgeInsets.zero,
+                                       constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                                       onPressed: () {
+                                         HapticFeedback.lightImpact();
+                                         final step = _getStepSize(item.unit);
+                                         final nextQty = ((item.quantity + step) * 1000).round() / 1000.0;
+                                         if (availableStock > 0 && nextQty > availableStock) {
+                                           HapticFeedback.heavyImpact();
+                                           ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                                           if (item.quantity < availableStock) {
+                                             ref.read(activeCartNotifierProvider).updateQuantity(item.productId, availableStock);
+                                             ScaffoldMessenger.of(context).showSnackBar(
+                                               SnackBar(
+                                                 content: Text('Cannot add more. Set to maximum available stock: ${_formatQuantity(availableStock, item.unit)}'),
+                                                 backgroundColor: const Color(0xFFD97706),
+                                                 duration: const Duration(seconds: 3),
+                                               ),
+                                             );
+                                           } else {
+                                             ScaffoldMessenger.of(context).showSnackBar(
+                                               SnackBar(
+                                                 content: Text('Maximum available stock reached (${_formatQuantity(availableStock, item.unit)}). Cannot add more.'),
+                                                 backgroundColor: const Color(0xFFDC2626),
+                                                 duration: const Duration(seconds: 3),
+                                               ),
+                                             );
+                                           }
+                                           return;
+                                         }
+                                         ref.read(activeCartNotifierProvider).updateQuantity(item.productId, nextQty);
+                                       },
+                                     ),
                                   ],
                                 ),
                               ),
@@ -988,9 +1182,10 @@ class _CustomSizeDialogState extends State<CustomSizeDialog> {
     final unitLower = widget.item.unit.toLowerCase();
     if (unitLower == 'kg') {
       _unitOptions = ['kg', 'g'];
-      if (widget.item.quantity < 1.0 && (widget.item.quantity * 1000) % 100 == 0) {
+      final grams = (widget.item.quantity * 1000).round();
+      if (widget.item.quantity < 1.0 && (grams % 50 == 0 || grams % 10 == 0 || grams % 100 == 0)) {
         _selectedUnit = 'g';
-        _controller.text = (widget.item.quantity * 1000).toInt().toString();
+        _controller.text = grams.toString();
       } else {
         _selectedUnit = 'kg';
         _controller.text = widget.item.quantity.toString();
@@ -1021,16 +1216,42 @@ class _CustomSizeDialogState extends State<CustomSizeDialog> {
     super.dispose();
   }
 
+  double? get _availableStock {
+    final p = widget.product;
+    if (p == null) return null;
+    final isQuick = widget.item.isOrderNow;
+    final raw = isQuick ? p['order_now_stock'] : p['stock'];
+    final num? n = (raw is num) ? raw : num.tryParse(raw?.toString() ?? '');
+    return n?.toDouble();
+  }
+
   double get _enteredQty {
-    final val = double.tryParse(_controller.text.trim()) ?? 0.0;
+    final val = double.tryParse(_controller.text.trim().replaceAll(',', '.')) ?? 0.0;
     if (_selectedUnit == 'g') {
-      return val / 1000.0;
+      return ((val / 1000.0) * 1000).round() / 1000.0;
     } else if (_selectedUnit == 'pcs' &&
         (widget.item.unit.toLowerCase() == 'dozen' ||
             widget.item.unit.toLowerCase() == 'doz')) {
-      return val / 12.0;
+      return ((val / 12.0) * 1000).round() / 1000.0;
     }
-    return val;
+    return ((val) * 1000).round() / 1000.0;
+  }
+
+  String _formatQuantity(double qty, String unit) {
+    final u = unit.toLowerCase();
+    if (u.contains('kg')) {
+      if (qty < 1.0) {
+        return '${(qty * 1000).round()} g';
+      } else {
+        final hasTwoDecimals = (qty * 100).round() % 10 != 0;
+        final hasOneDecimal = (qty * 10).round() % 10 != 0;
+        return '${qty.toStringAsFixed(hasTwoDecimals ? 2 : (hasOneDecimal ? 1 : 0))} kg';
+      }
+    } else if (u.contains('doz')) {
+      return '$qty Dozen';
+    } else {
+      return '${qty.toStringAsFixed(qty == qty.toInt() ? 0 : 1)} $unit';
+    }
   }
 
   @override
@@ -1060,6 +1281,58 @@ class _CustomSizeDialogState extends State<CustomSizeDialog> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              if (_availableStock != null && _availableStock! > 0)
+                Container(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF0FDF4),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xFF86EFAC)),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.inventory_2_outlined, size: 14, color: Color(0xFF166534)),
+                          const SizedBox(width: 6),
+                          Text(
+                            'Available Stock: ${_formatQuantity(_availableStock!, widget.item.unit)}',
+                            style: GoogleFonts.inter(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: const Color(0xFF166534),
+                            ),
+                          ),
+                        ],
+                      ),
+                      GestureDetector(
+                        onTap: () {
+                          HapticFeedback.selectionClick();
+                          setState(() {
+                            if (_selectedUnit == 'g' && widget.item.unit.toLowerCase().contains('kg')) {
+                              _controller.text = (_availableStock! * 1000).round().toString();
+                            } else {
+                              _controller.text = (_availableStock! % 1 == 0)
+                                  ? _availableStock!.toInt().toString()
+                                  : _availableStock!.toStringAsFixed(2);
+                            }
+                          });
+                        },
+                        child: Text(
+                          'Set to Max',
+                          style: GoogleFonts.inter(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: const Color(0xFF166534),
+                            decoration: TextDecoration.underline,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
@@ -1082,9 +1355,12 @@ class _CustomSizeDialogState extends State<CustomSizeDialog> {
                         if (val == null || val.trim().isEmpty) {
                           return 'Required';
                         }
-                        final d = double.tryParse(val.trim());
+                        final d = double.tryParse(val.trim().replaceAll(',', '.'));
                         if (d == null || d <= 0) {
                           return 'Must be > 0';
+                        }
+                        if (_availableStock != null && _availableStock! > 0 && _enteredQty > _availableStock!) {
+                          return 'Exceeds stock (Max: ${_formatQuantity(_availableStock!, widget.item.unit)})';
                         }
                         return null;
                       },
@@ -1098,7 +1374,7 @@ class _CustomSizeDialogState extends State<CustomSizeDialog> {
                     Expanded(
                       flex: 1,
                       child: DropdownButtonFormField<String>(
-                        initialValue: _selectedUnit,
+                        value: _selectedUnit,
                         dropdownColor: const Color(0xFFFAF6F2),
                         style: GoogleFonts.inter(color: textColorPrimary, fontWeight: FontWeight.bold),
                         decoration: const InputDecoration(
@@ -1211,7 +1487,16 @@ class _CustomSizeDialogState extends State<CustomSizeDialog> {
           ),
           onPressed: () {
             if (_formKey.currentState!.validate()) {
-              final double finalQty = _enteredQty;
+              double finalQty = _enteredQty;
+              if (_availableStock != null && _availableStock! > 0 && finalQty > _availableStock!) {
+                finalQty = _availableStock!;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('Adjusted ${widget.item.productName} to maximum available stock (${_formatQuantity(_availableStock!, widget.item.unit)}).'),
+                    backgroundColor: const Color(0xFFD97706),
+                  ),
+                );
+              }
               widget.ref.read(activeCartNotifierProvider).updateQuantity(widget.item.productId, finalQty);
               Navigator.pop(context);
             }
@@ -1316,340 +1601,6 @@ class _AnimatedCounterState extends State<AnimatedCounter> with SingleTickerProv
           style: widget.style,
         );
       },
-    );
-  }
-}
-
-class _GlassSlidingCartToggle extends StatefulWidget {
-  final bool isQuick;
-  final bool isQuickOrderClosed;
-  final int normalItemCount;
-  final int quickItemCount;
-  final VoidCallback onNormalTap;
-  final VoidCallback onQuickTap;
-
-  const _GlassSlidingCartToggle({
-    required this.isQuick,
-    required this.isQuickOrderClosed,
-    required this.normalItemCount,
-    required this.quickItemCount,
-    required this.onNormalTap,
-    required this.onQuickTap,
-  });
-
-  @override
-  State<_GlassSlidingCartToggle> createState() => _GlassSlidingCartToggleState();
-}
-
-class _GlassSlidingCartToggleState extends State<_GlassSlidingCartToggle> with TickerProviderStateMixin {
-  late final AnimationController _glowController;
-  late final AnimationController _shimmerController;
-  late final Animation<double> _glowAnimation;
-
-  @override
-  void initState() {
-    super.initState();
-    _glowController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1400),
-    );
-
-    _shimmerController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 2200),
-    );
-
-    _glowAnimation = CurvedAnimation(
-      parent: _glowController,
-      curve: Curves.easeInOut,
-    );
-
-    final bool isTesting = WidgetsBinding.instance.runtimeType.toString().contains('Test');
-    if (!isTesting) {
-      _glowController.repeat(reverse: true);
-      _shimmerController.repeat();
-    }
-  }
-
-  @override
-  void dispose() {
-    _glowController.dispose();
-    _shimmerController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final bool hasQuickItems = widget.quickItemCount > 0;
-    final bool hasNormalItems = widget.normalItemCount > 0;
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-      child: AnimatedBuilder(
-        animation: Listenable.merge([_glowAnimation, _shimmerController]),
-        builder: (context, child) {
-          final glowVal = _glowAnimation.value;
-          final shimmerVal = _shimmerController.value;
-
-          return Container(
-            height: 48,
-            padding: const EdgeInsets.all(4),
-            decoration: BoxDecoration(
-              color: const Color(0xFFF1F5F9),
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(
-                color: hasQuickItems
-                    ? const Color(0xFFF59E0B).withValues(alpha: 0.35 + 0.35 * glowVal)
-                    : const Color(0xFFE2E8F0),
-                width: hasQuickItems ? 1.5 : 1.0,
-              ),
-              boxShadow: hasQuickItems
-                  ? [
-                      BoxShadow(
-                        color: const Color(0xFFF59E0B).withValues(alpha: 0.18 + 0.22 * glowVal),
-                        blurRadius: 10 + 6 * glowVal,
-                        spreadRadius: 0.5 + 1.5 * glowVal,
-                        offset: const Offset(0, 2),
-                      ),
-                      BoxShadow(
-                        color: const Color(0xFF0F172A).withValues(alpha: 0.04),
-                        blurRadius: 6,
-                        offset: const Offset(0, 2),
-                      ),
-                    ]
-                  : [
-                      BoxShadow(
-                        color: const Color(0xFF0F172A).withValues(alpha: 0.04),
-                        blurRadius: 6,
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
-            ),
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final halfWidth = (constraints.maxWidth) / 2;
-
-                return Stack(
-                  children: [
-                    // ── 1. Sliding Glass Indicator Pill ──
-                    AnimatedAlign(
-                      duration: const Duration(milliseconds: 320),
-                      curve: Curves.easeInOutCubicEmphasized,
-                      alignment: widget.isQuick ? Alignment.centerRight : Alignment.centerLeft,
-                      child: Container(
-                        width: halfWidth,
-                        height: double.infinity,
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(20),
-                          gradient: LinearGradient(
-                            colors: widget.isQuick
-                                ? [
-                                    const Color(0xFF1B3624),
-                                    const Color(0xFF245235),
-                                  ]
-                                : [
-                                    const Color(0xFF0F172A),
-                                    const Color(0xFF1E293B),
-                                  ],
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                          ),
-                          border: Border.all(
-                            color: widget.isQuick
-                                ? (hasQuickItems
-                                    ? const Color(0xFFF59E0B).withValues(alpha: 0.5 + 0.3 * glowVal)
-                                    : Colors.white.withValues(alpha: 0.3))
-                                : Colors.white.withValues(alpha: 0.2),
-                            width: 1.2,
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: (widget.isQuick ? const Color(0xFF1B3624) : const Color(0xFF0F172A)).withValues(alpha: 0.35),
-                              blurRadius: 8,
-                              offset: const Offset(0, 3),
-                            ),
-                            if (widget.isQuick && hasQuickItems)
-                              BoxShadow(
-                                color: const Color(0xFFF59E0B).withValues(alpha: 0.3 + 0.3 * glowVal),
-                                blurRadius: 12 + 6 * glowVal,
-                                spreadRadius: 1.0 + 1.0 * glowVal,
-                              ),
-                          ],
-                        ),
-                        // Glass specular reflection shimmer line
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(20),
-                          child: Stack(
-                            children: [
-                              // Glass top specular highlight
-                              Positioned(
-                                top: 0,
-                                left: 0,
-                                right: 0,
-                                height: 1.5,
-                                child: Container(
-                                  decoration: BoxDecoration(
-                                    gradient: LinearGradient(
-                                      colors: [
-                                        Colors.white.withValues(alpha: 0.0),
-                                        Colors.white.withValues(alpha: 0.6),
-                                        Colors.white.withValues(alpha: 0.0),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              // Glass sliding sheen sweep (when quick items active or selected)
-                              if (widget.isQuick || hasQuickItems)
-                                Positioned.fill(
-                                  child: FractionalTranslation(
-                                    translation: Offset(shimmerVal * 3.0 - 1.5, 0.0),
-                                    child: Transform.rotate(
-                                      angle: 0.4,
-                                      child: Container(
-                                        width: 30,
-                                        decoration: BoxDecoration(
-                                          gradient: LinearGradient(
-                                            colors: [
-                                              Colors.transparent,
-                                              (widget.isQuick ? const Color(0xFFF59E0B) : Colors.white).withValues(alpha: 0.18),
-                                              Colors.transparent,
-                                            ],
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-
-                    // ── 2. Tap Targets & Labels ──
-                    Row(
-                      children: [
-                        // Left: Normal Delivery Tab
-                        Expanded(
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onTap: widget.onNormalTap,
-                            child: Container(
-                              alignment: Alignment.center,
-                              child: Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(
-                                    Icons.local_shipping_outlined,
-                                    size: 15,
-                                    color: !widget.isQuick ? Colors.white : const Color(0xFF64748B),
-                                  ),
-                                  const SizedBox(width: 5),
-                                  Text(
-                                    'Normal',
-                                    style: GoogleFonts.inter(
-                                      color: !widget.isQuick ? Colors.white : const Color(0xFF475569),
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 13,
-                                    ),
-                                  ),
-                                  if (hasNormalItems) ...[
-                                    const SizedBox(width: 5),
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
-                                      decoration: BoxDecoration(
-                                        color: !widget.isQuick
-                                            ? Colors.white.withValues(alpha: 0.25)
-                                            : const Color(0xFFCBD5E1),
-                                        borderRadius: BorderRadius.circular(10),
-                                      ),
-                                      child: Text(
-                                        '${widget.normalItemCount}',
-                                        style: GoogleFonts.inter(
-                                          color: !widget.isQuick ? Colors.white : const Color(0xFF334155),
-                                          fontSize: 10.5,
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
-
-                        // Right: Quick Order Tab
-                        Expanded(
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onTap: widget.onQuickTap,
-                            child: Container(
-                              alignment: Alignment.center,
-                              child: Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(
-                                    Icons.bolt_rounded,
-                                    color: widget.isQuick
-                                        ? const Color(0xFFF59E0B)
-                                        : (hasQuickItems
-                                            ? const Color(0xFFD97706)
-                                            : const Color(0xFF64748B)),
-                                    size: 16,
-                                  ),
-                                  const SizedBox(width: 4),
-                                  Text(
-                                    'Quick Order',
-                                    style: GoogleFonts.inter(
-                                      color: widget.isQuick
-                                          ? Colors.white
-                                          : (hasQuickItems
-                                              ? const Color(0xFFB45309)
-                                              : const Color(0xFF475569)),
-                                      fontWeight: hasQuickItems || widget.isQuick ? FontWeight.w800 : FontWeight.bold,
-                                      fontSize: 13,
-                                    ),
-                                  ),
-                                  if (hasQuickItems) ...[
-                                    const SizedBox(width: 5),
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFFF59E0B),
-                                        borderRadius: BorderRadius.circular(10),
-                                        boxShadow: [
-                                          BoxShadow(
-                                            color: const Color(0xFFF59E0B).withValues(alpha: 0.4 + 0.3 * glowVal),
-                                            blurRadius: 4 + 2 * glowVal,
-                                          ),
-                                        ],
-                                      ),
-                                      child: Text(
-                                        '${widget.quickItemCount}',
-                                        style: GoogleFonts.inter(
-                                          color: Colors.white,
-                                          fontSize: 10.5,
-                                          fontWeight: FontWeight.w900,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                );
-              },
-            ),
-          );
-        },
-      ),
     );
   }
 }

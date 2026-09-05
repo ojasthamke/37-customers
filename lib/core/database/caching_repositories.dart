@@ -6,6 +6,13 @@ import 'package:uuid/uuid.dart';
 import 'repositories.dart';
 import 'database_helper.dart';
 
+double? _asDouble(dynamic val) {
+  if (val == null) return null;
+  if (val is num) return val.toDouble();
+  if (val is String) return double.tryParse(val.trim());
+  return null;
+}
+
 /// Cache-through repository pattern for offline-first architecture.
 /// Tries Supabase first → caches results in SQLite → falls back to SQLite on failure.
 
@@ -155,7 +162,7 @@ class CachingCatalogRepository implements CatalogRepository {
         final remoteData = await _remote.getProductById(id);
         if (remoteData != null) {
           final db = await _dbHelper.database;
-          await db.insert('products', remoteData, conflictAlgorithm: ConflictAlgorithm.replace);
+          await db.insert('products', _sanitizeProductForSqlite(remoteData), conflictAlgorithm: ConflictAlgorithm.replace);
           await _dbHelper.updateLastSynced('product_$id');
         }
         return remoteData;
@@ -180,7 +187,7 @@ class CachingCatalogRepository implements CatalogRepository {
       final remoteData = await _remote.getProductById(id);
       if (remoteData != null) {
         final db = await _dbHelper.database;
-        await db.insert('products', remoteData, conflictAlgorithm: ConflictAlgorithm.replace);
+        await db.insert('products', _sanitizeProductForSqlite(remoteData), conflictAlgorithm: ConflictAlgorithm.replace);
         await _dbHelper.updateLastSynced('product_$id');
         debugPrint('[Cache] ProductDetail revalidation success.');
         if (onRefresh != null) {
@@ -190,6 +197,32 @@ class CachingCatalogRepository implements CatalogRepository {
     } catch (e) {
       debugPrint('[Cache] ProductDetail revalidation failure: $e');
     }
+  }
+
+  Map<String, dynamic> _sanitizeProductForSqlite(Map<String, dynamic> p) {
+    return {
+      'id': p['id'],
+      'name': p['name'],
+      'category_id': p['category_id'],
+      'image_path': p['image_path'],
+      'description': p['description'] is String ? p['description'] : p['description']?.toString(),
+      'price': _asDouble(p['price']) ?? 0.0,
+      'unit': p['unit'],
+      'stock': _asDouble(p['stock']) ?? 0.0,
+      'is_available': (p['is_available'] == null || p['is_available'] == true || p['is_available'] == 1) ? 1 : 0,
+      'is_enabled': (p['is_enabled'] != false && p['is_enabled'] != 0) ? 1 : 0,
+      'created_at': p['created_at']?.toString(),
+      'order_now_stock': _asDouble(p['order_now_stock']) ?? 0.0,
+      'order_now_price': _asDouble(p['order_now_price']) ?? (_asDouble(p['price']) ?? 0.0),
+      'order_now_mrp': _asDouble(p['order_now_mrp']) ?? (_asDouble(p['mrp']) ?? 0.0),
+      'order_now_cost_price': _asDouble(p['order_now_cost_price']) ?? 0.0,
+      'order_now_is_available': (p['order_now_is_available'] == true ||
+              p['order_now_is_available'] == 1 ||
+              p['order_now_is_available']?.toString() == '1' ||
+              p['order_now_is_available']?.toString().toLowerCase() == 'true')
+          ? 1
+          : 0,
+    };
   }
 
   @override
@@ -206,8 +239,8 @@ class CachingCatalogRepository implements CatalogRepository {
         batch.insert(
           'categories',
           {
-            'id': cat['id'],
-            'name': cat['name'],
+            'id': cat['id']?.toString(),
+            'name': cat['name']?.toString() ?? '',
             'is_enabled': (cat['is_enabled'] == true || cat['is_enabled'] == 1) ? 1 : 0,
             'created_at': cat['created_at']?.toString(),
           },
@@ -228,23 +261,7 @@ class CachingCatalogRepository implements CatalogRepository {
       for (final p in products) {
         batch.insert(
           'products',
-          {
-            'id': p['id'],
-            'name': p['name'],
-            'category_id': p['category_id'],
-            'image_path': p['image_path'],
-            'description': p['description'],
-            'price': (p['price'] as num?)?.toDouble() ?? 0.0,
-            'unit': p['unit'],
-            'is_available': (p['is_available'] == true || p['is_available'] == 1) ? 1 : 0,
-            'is_enabled': (p['is_enabled'] == true || p['is_enabled'] == 1) ? 1 : 0,
-            'created_at': p['created_at']?.toString(),
-            'order_now_stock': (p['order_now_stock'] as num?)?.toDouble() ?? 0.0,
-            'order_now_price': (p['order_now_price'] as num?)?.toDouble() ?? 0.0,
-            'order_now_mrp': (p['order_now_mrp'] as num?)?.toDouble() ?? 0.0,
-            'order_now_cost_price': (p['order_now_cost_price'] as num?)?.toDouble() ?? 0.0,
-            'order_now_is_available': (p['order_now_is_available'] == null || p['order_now_is_available'] == true || p['order_now_is_available'] == 1) ? 1 : 0,
-          },
+          _sanitizeProductForSqlite(p),
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
       }
@@ -280,6 +297,7 @@ class CachingOrderRepository implements OrderRepository {
     String? subRoadName,
     String? orderType,
     String? orderTakingDate,
+    String? customerId,
   }) async {
     final String actualOfflineNo = offlineOrderNo ?? () {
       final now = DateTime.now();
@@ -290,6 +308,41 @@ class CachingOrderRepository implements OrderRepository {
 
     final connectivityResults = await Connectivity().checkConnectivity();
     final bool isOffline = connectivityResults.every((r) => r == ConnectivityResult.none);
+
+    Future<Map<String, dynamic>> queueLocally() async {
+      debugPrint('CachingOrder: Queuing order locally in SQLite for background sync.');
+      final localResult = await _local.placeOrder(
+        customerPhone: customerPhone,
+        deliveryAddress: deliveryAddress,
+        totalAmount: totalAmount,
+        items: items,
+        idempotencyKey: idempotencyKey,
+        deliveryDate: deliveryDate,
+        offlineOrderNo: actualOfflineNo,
+        areaName: areaName,
+        roadName: roadName,
+        subRoadName: subRoadName,
+        orderType: orderType,
+        orderTakingDate: orderTakingDate,
+        customerId: customerId,
+      );
+      final db = await _dbHelper.database;
+      await db.update(
+        'orders',
+        {
+          'sync_status': 'pending',
+          'offline_order_no': actualOfflineNo,
+        },
+        where: 'id = ?',
+        whereArgs: [localResult['id']],
+      );
+      return {
+        ...localResult,
+        'sync_status': 'pending',
+        'is_offline': true,
+        'offline_order_no': actualOfflineNo,
+      };
+    }
 
     if (!isOffline) {
       // ONLINE MODE: Submit directly to Supabase RPC
@@ -307,47 +360,49 @@ class CachingOrderRepository implements OrderRepository {
           subRoadName: subRoadName,
           orderType: orderType,
           orderTakingDate: orderTakingDate,
+          customerId: customerId,
         );
+        final mergedResult = Map<String, dynamic>.from(result);
+        mergedResult['total_amount'] = (result['total_amount'] as num?)?.toDouble() ?? totalAmount;
+        mergedResult['order_type'] = orderType ?? 'Normal';
+
         // Clean up any local offline duplicate before caching the synced order
         final db = await _dbHelper.database;
-        await _deleteLocalOrderDuplicate(db, result);
+        await _deleteLocalOrderDuplicate(db, mergedResult);
         if (actualOfflineNo.isNotEmpty) {
           try {
             await db.delete('orders', where: "offline_order_no = ?", whereArgs: [actualOfflineNo]);
           } catch (_) {}
         }
         // Cache the synced order locally
-        await _cacheOrder(result, items, 'synced');
-        return result;
+        await _cacheOrder(mergedResult, items, 'synced');
+        return mergedResult;
       } catch (e) {
         debugPrint('CachingOrder: Online order submission error: $e');
+        final errorStr = e.toString().toLowerCase();
+        final bool isNetworkError = errorStr.contains('socketexception') ||
+            errorStr.contains('clientexception') ||
+            errorStr.contains('timeoutexception') ||
+            errorStr.contains('failed host lookup') ||
+            errorStr.contains('connection refused') ||
+            errorStr.contains('connection closed') ||
+            errorStr.contains('network is unreachable') ||
+            errorStr.contains('software caused connection abort') ||
+            errorStr.contains('connection reset') ||
+            errorStr.contains('handshakeexception') ||
+            errorStr.contains('failed to connect') ||
+            errorStr.contains('network error');
+
+        if (isNetworkError) {
+          debugPrint('CachingOrder: Network error detected. Gracefully queuing offline order.');
+          return await queueLocally();
+        }
         rethrow;
       }
     } else {
       // OFFLINE MODE: Network is disconnected. Queue locally in SQLite for future sync
       debugPrint('CachingOrder: Network is offline, queuing order locally for sync.');
-      final localResult = await _local.placeOrder(
-        customerPhone: customerPhone,
-        deliveryAddress: deliveryAddress,
-        totalAmount: totalAmount,
-        items: items,
-        idempotencyKey: idempotencyKey,
-        deliveryDate: deliveryDate,
-        offlineOrderNo: actualOfflineNo,
-        areaName: areaName,
-        roadName: roadName,
-        subRoadName: subRoadName,
-        orderType: orderType,
-        orderTakingDate: orderTakingDate,
-      );
-      final db = await _dbHelper.database;
-      await db.update(
-        'orders',
-        {'sync_status': 'pending'},
-        where: 'id = ?',
-        whereArgs: [localResult['id']],
-      );
-      return {...localResult, 'sync_status': 'pending'};
+      return await queueLocally();
     }
   }
 
@@ -361,7 +416,7 @@ class CachingOrderRepository implements OrderRepository {
     final cachedLocal = await _local.getOrders(customerPhone);
     final pendingOrders = await db.query(
       'orders',
-      where: "sync_status = 'pending' OR sync_status = 'failed'",
+      where: "sync_status IN ('pending', 'failed', 'permanently_failed')",
       orderBy: 'order_date DESC',
     );
     
@@ -486,7 +541,7 @@ class CachingOrderRepository implements OrderRepository {
       if (onRefresh != null) {
         final pendingOrders = await db.query(
           'orders',
-          where: "sync_status = 'pending' OR sync_status = 'failed'",
+          where: "sync_status IN ('pending', 'failed', 'permanently_failed')",
           orderBy: 'order_date DESC',
         );
         final Map<String, Map<String, dynamic>> dedup = {};
@@ -648,11 +703,11 @@ class CachingOrderRepository implements OrderRepository {
           {
             'id': itemId,
             'order_id': orderId,
-            'product_id': item['product_id'],
-            'product_name': item['product_name'],
+            'product_id': item['product_id']?.toString(),
+            'product_name': item['product_name']?.toString() ?? 'Item',
             'price': price,
             'quantity': qty,
-            'unit': item['unit'],
+            'unit': item['unit']?.toString() ?? 'kg',
             'total_price': totalPrice,
           },
           conflictAlgorithm: ConflictAlgorithm.replace,
@@ -672,25 +727,25 @@ class CachingOrderRepository implements OrderRepository {
       await db.insert(
         'orders',
         {
-          'id': order['id'],
-          'order_number': order['order_number'],
-          'customer_id': order['customer_id'],
-          'customer_phone': order['customer_phone'],
-          'delivery_address': order['delivery_address'],
+          'id': order['id']?.toString(),
+          'order_number': order['order_number']?.toString(),
+          'customer_id': order['customer_id']?.toString(),
+          'customer_phone': order['customer_phone']?.toString(),
+          'delivery_address': order['delivery_address']?.toString(),
           'order_date': order['order_date']?.toString(),
-          'status': order['status'],
+          'status': order['status']?.toString() ?? 'Pending',
           'total_amount': (order['total_amount'] as num?)?.toDouble() ?? 0.0,
           'sync_status': syncStatus,
           'delivery_date': order['delivery_date']?.toString(),
-          'area_id': order['area_id'],
-          'area_name': order['area_name'],
-          'road_id': order['road_id'],
-          'road_name': order['road_name'],
-          'sub_road_id': order['sub_road_id'],
-          'sub_road_name': order['sub_road_name'],
-          'customer_name': order['customer_name'],
-          'offline_order_no': order['offline_order_no'] ?? order['order_number'],
-          'order_type': order['order_type'] ?? 'Normal',
+          'area_id': order['area_id']?.toString(),
+          'area_name': order['area_name']?.toString(),
+          'road_id': order['road_id']?.toString(),
+          'road_name': order['road_name']?.toString(),
+          'sub_road_id': order['sub_road_id']?.toString(),
+          'sub_road_name': order['sub_road_name']?.toString(),
+          'customer_name': order['customer_name']?.toString(),
+          'offline_order_no': (order['offline_order_no'] ?? order['order_number'])?.toString(),
+          'order_type': order['order_type']?.toString() ?? 'Normal',
           'order_taking_date': order['order_taking_date']?.toString(),
         },
         conflictAlgorithm: ConflictAlgorithm.replace,
@@ -748,15 +803,34 @@ class CachingOrderRepository implements OrderRepository {
     });
   }
 
-  /// Mark a local order as failed
+  /// Mark a local order as failed and increment the retry counter
   Future<void> markOrderFailed(String orderId, String error) async {
+    final db = await _dbHelper.database;
+    await db.rawUpdate(
+      "UPDATE orders SET sync_status = 'failed', sync_retry_count = COALESCE(sync_retry_count, 0) + 1 WHERE id = ?",
+      [orderId],
+    );
+  }
+
+  /// Mark a local order as permanently failed (exceeded max retries)
+  Future<void> markOrderPermanentlyFailed(String orderId) async {
     final db = await _dbHelper.database;
     await db.update(
       'orders',
-      {'sync_status': 'failed'},
+      {'sync_status': 'permanently_failed'},
       where: 'id = ?',
       whereArgs: [orderId],
     );
+  }
+
+  @override
+  Future<void> retryOrderSync(String orderId) async {
+    await _local.retryOrderSync(orderId);
+  }
+
+  @override
+  Future<void> dismissPermanentlyFailedOrder(String orderId) async {
+    await _local.dismissPermanentlyFailedOrder(orderId);
   }
 }
 
@@ -814,6 +888,56 @@ class CachingCustomerRepository implements CustomerRepository {
   }
 
   @override
+  Future<Map<String, dynamic>?> loginWithGoogle() async {
+    try {
+      final customer = await _remote.loginWithGoogle();
+      if (customer != null) {
+        await _cacheCustomer(customer);
+      }
+      return customer;
+    } catch (e) {
+      debugPrint('CachingCustomer: Supabase loginWithGoogle failed: $e');
+      rethrow;
+    }
+  }
+
+  @override
+  Future<Map<String, dynamic>?> completeGoogleOnboarding({
+    required String customerId,
+    required String name,
+    required String phone,
+    required String customerCode,
+    required String password,
+  }) async {
+    try {
+      final customer = await _remote.completeGoogleOnboarding(
+        customerId: customerId,
+        name: name,
+        phone: phone,
+        customerCode: customerCode,
+        password: password,
+      );
+      if (customer != null) {
+        await _cacheCustomer(customer);
+        return customer;
+      }
+    } catch (e) {
+      debugPrint('CachingCustomer: Supabase completeGoogleOnboarding failed: $e');
+    }
+    final localCust = await _local.completeGoogleOnboarding(
+      customerId: customerId,
+      name: name,
+      phone: phone,
+      customerCode: customerCode,
+      password: password,
+    );
+    if (localCust != null) {
+      await _cacheCustomer(localCust);
+    }
+    return localCust;
+  }
+
+  @override
   Future<Map<String, dynamic>?> setupPasswordForCode(String code, String name, String password, {String? pin}) async {
     try {
       final customer = await _remote.setupPasswordForCode(code, name, password, pin: pin);
@@ -822,15 +946,15 @@ class CachingCustomerRepository implements CustomerRepository {
       }
       return customer;
     } catch (e) {
-      debugPrint('CachingCustomer: Supabase setupPasswordForCode failed, trying local: $e');
-      return await _local.setupPasswordForCode(code, name, password, pin: pin);
+      debugPrint('CachingCustomer: Supabase setupPasswordForCode failed: $e');
+      rethrow;
     }
   }
 
   @override
-  Future<Map<String, dynamic>?> registerGuest(String name, String phone, String address) async {
+  Future<Map<String, dynamic>?> registerGuest(String name, String phone, String address, {String? areaId, String? roadId, String? subRoadId}) async {
     try {
-      final customer = await _remote.registerGuest(name, phone, address);
+      final customer = await _remote.registerGuest(name, phone, address, areaId: areaId, roadId: roadId, subRoadId: subRoadId);
       if (customer != null) {
         await _cacheCustomer(customer);
         return customer;
@@ -838,7 +962,7 @@ class CachingCustomerRepository implements CustomerRepository {
     } catch (e) {
       debugPrint('CachingCustomer: Supabase registerGuest failed, trying local: $e');
     }
-    final localCustomer = await _local.registerGuest(name, phone, address);
+    final localCustomer = await _local.registerGuest(name, phone, address, areaId: areaId, roadId: roadId, subRoadId: subRoadId);
     return localCustomer;
   }
 
@@ -871,8 +995,14 @@ class CachingCustomerRepository implements CustomerRepository {
           (cachedData['area_id'] != null && cachedData['area_name'] == null) ||
           (cachedData['road_id'] != null && cachedData['road_name'] == null) ||
           (cachedData['sub_road_id'] != null && cachedData['sub_road_name'] == null);
-      if (hasMissingRouteFields) {
-        debugPrint('[Cache] Customer profile has missing route fields. Forcing revalidation.');
+      final rawSched = cachedData['delivery_schedule'];
+      final bool hasMissingSchedule = rawSched == null || 
+          (rawSched is List && rawSched.isEmpty) ||
+          (rawSched is String && (rawSched.trim().isEmpty || rawSched.trim() == '[]'));
+      final rawAddr = cachedData['address']?.toString().trim();
+      final bool hasMissingAddress = rawAddr == null || rawAddr.isEmpty || rawAddr.toLowerCase() == 'n/a';
+      if (hasMissingRouteFields || hasMissingSchedule || hasMissingAddress) {
+        debugPrint('[Cache] Customer profile has missing route/schedule/address. Forcing revalidation.');
         isStale = true;
       }
     }
@@ -925,8 +1055,8 @@ class CachingCustomerRepository implements CustomerRepository {
       await _remote.updateProfile(id, name, phone, address, areaId: areaId, roadId: roadId, subRoadId: subRoadId);
       await _local.updateProfile(id, name, phone, address, areaId: areaId, roadId: roadId, subRoadId: subRoadId);
     } catch (e) {
-      debugPrint('CachingCustomer: Supabase updateProfile failed, trying local: $e');
-      await _local.updateProfile(id, name, phone, address, areaId: areaId, roadId: roadId, subRoadId: subRoadId);
+      debugPrint('CachingCustomer: Supabase updateProfile failed: $e');
+      throw Exception('Network connection required to update profile. Please check your internet connection and try again.');
     }
   }
 
@@ -934,17 +1064,26 @@ class CachingCustomerRepository implements CustomerRepository {
   Future<void> changePassword(String newPassword) async {
     try {
       await _remote.changePassword(newPassword);
-    } finally {
       await _local.changePassword(newPassword);
+    } catch (e) {
+      debugPrint('CachingCustomer: changePassword failed: $e');
+      throw Exception('Network connection required to change password. Please check your internet connection and try again.');
     }
   }
 
   @override
   Future<bool> resetPassword(String phone, String newPassword) async {
     try {
-      await _remote.resetPassword(phone, newPassword);
-    } catch (_) {}
-    return await _local.resetPassword(phone, newPassword);
+      final success = await _remote.resetPassword(phone, newPassword);
+      if (success) {
+        await _local.resetPassword(phone, newPassword);
+        return true;
+      }
+      return false;
+    } catch (e) {
+      debugPrint('CachingCustomer: resetPassword failed: $e');
+      return false;
+    }
   }
 
   @override
@@ -952,8 +1091,19 @@ class CachingCustomerRepository implements CustomerRepository {
     try {
       final res = await _remote.checkCustomerAuthStatus(identifier);
       if (res['exists'] == true) return res;
-    } catch (_) {}
-    return await _local.checkCustomerAuthStatus(identifier);
+      final localRes = await _local.checkCustomerAuthStatus(identifier);
+      if (localRes['exists'] == true) return localRes;
+      return res;
+    } catch (e) {
+      debugPrint('CachingCustomer: checkCustomerAuthStatus remote error: $e');
+      final localRes = await _local.checkCustomerAuthStatus(identifier);
+      if (localRes['exists'] == true) return localRes;
+      return {
+        'exists': false,
+        'has_password': false,
+        'message': 'Unable to connect to server. Please check your internet connection and try again.',
+      };
+    }
   }
 
   @override
@@ -966,11 +1116,15 @@ class CachingCustomerRepository implements CustomerRepository {
       final res = await _remote.resetPasswordWithVerification(identifier, phoneConfirm, newPassword);
       if (res['success'] == true) {
         await _local.resetPasswordWithVerification(identifier, phoneConfirm, newPassword);
-        return res;
       }
       return res;
-    } catch (_) {}
-    return await _local.resetPasswordWithVerification(identifier, phoneConfirm, newPassword);
+    } catch (e) {
+      debugPrint('CachingCustomer: resetPasswordWithVerification failed: $e');
+      return {
+        'success': false,
+        'error': 'Network connection required to reset password. Please check your internet connection and try again.',
+      };
+    }
   }
 
   @override
@@ -998,12 +1152,28 @@ class CachingCustomerRepository implements CustomerRepository {
   Future<void> _cacheCustomer(Map<String, dynamic> customer) async {
     try {
       final db = await _dbHelper.database;
+
+      // Auto-compose address if blank or N/A
+      String resolvedAddr = (customer['address'] as String? ?? '').trim();
+      if (resolvedAddr.isEmpty || resolvedAddr.toUpperCase() == 'N/A') {
+        final parts = <String>[];
+        final srName = (customer['sub_road_name'] as String? ?? '').trim();
+        final rName = (customer['road_name'] as String? ?? '').trim();
+        final aName = (customer['area_name'] as String? ?? '').trim();
+        if (srName.isNotEmpty && srName.toUpperCase() != 'N/A') parts.add(srName);
+        if (rName.isNotEmpty && rName.toUpperCase() != 'N/A') parts.add(rName);
+        if (aName.isNotEmpty && aName.toUpperCase() != 'N/A' && !rName.contains(aName)) parts.add(aName);
+        if (parts.isNotEmpty) {
+          resolvedAddr = parts.join(', ');
+        }
+      }
+
       final Map<String, dynamic> row = {
         'id': customer['id'],
         'name': customer['name'],
         'phone': customer['phone'],
         'email': customer['email'],
-        'address': customer['address'],
+        'address': resolvedAddr.isNotEmpty ? resolvedAddr : customer['address'],
         'is_logged_in': 1,
         'customer_code': customer['customer_code'],
         'is_guest': (customer['is_guest'] == true || customer['is_guest'] == 1) ? 1 : 0,
@@ -1013,6 +1183,9 @@ class CachingCustomerRepository implements CustomerRepository {
         'area_name': customer['area_name'],
         'road_name': customer['road_name'],
         'sub_road_name': customer['sub_road_name'],
+        'auth_provider': customer['auth_provider'] ?? 'phone_password',
+        'google_id': customer['google_id']?.toString(),
+        'is_new_customer': (customer['is_new_customer'] == true || customer['is_new_customer'] == 1) ? 1 : 0,
         'delivery_schedule': customer['delivery_schedule'] != null ? json.encode(customer['delivery_schedule']) : null,
         'cutoff_time': customer['cutoff_time'],
         'created_at': customer['created_at']?.toString(),

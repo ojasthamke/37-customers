@@ -1,5 +1,4 @@
 import 'dart:math' as math;
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -10,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../dashboard/home_screen.dart';
 import '../order/order_details_screen.dart';
 import '../auth/auth_provider.dart';
+import '../../core/services/sound_service.dart';
 
 // ── SPARKLE PARTICLE MODEL ──────────────────────────────────────────────────
 class SparkleParticle {
@@ -371,21 +371,23 @@ class OrderConfirmationScreen extends ConsumerStatefulWidget {
 
 class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScreen>
     with SingleTickerProviderStateMixin {
-  bool _hasCheckmarkHaptic = false;
+  bool _hasTriggeredConfirmationFeedback = false;
 
-  void _vibrateFor2Seconds() {
-    int count = 0;
-    Timer.periodic(const Duration(milliseconds: 100), (timer) {
-      if (!mounted) {
-        timer.cancel();
-        return;
-      }
-      HapticFeedback.vibrate();
-      count++;
-      if (count >= 20) {
-        timer.cancel();
-      }
-    });
+  void _triggerConfirmationFeedback() {
+    if (_hasTriggeredConfirmationFeedback) return;
+    _hasTriggeredConfirmationFeedback = true;
+
+    // 1. Short, soft, premium tactile pulse (crisp and satisfying)
+    try {
+      HapticFeedback.lightImpact();
+    } catch (_) {
+      // Gracefully do nothing if haptic hardware is unavailable
+    }
+
+    // 2. Play synchronized success chime (universfield-success-notification)
+    try {
+      SoundService.playSuccessSound();
+    } catch (_) {}
   }
 
   late final AnimationController _controller;
@@ -456,10 +458,9 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
       final value = _controller.value;
       if (!mounted) return;
 
-      // Haptic vibration when checkmark draws (at 0.65)
-      if (value >= 0.65 && !_hasCheckmarkHaptic) {
-        _hasCheckmarkHaptic = true;
-        _vibrateFor2Seconds();
+      // Synchronized single subtle haptic pulse + success chime when checkmark appears (at 0.65)
+      if (value >= 0.65 && !_hasTriggeredConfirmationFeedback) {
+        _triggerConfirmationFeedback();
       }
     });
 
@@ -494,7 +495,10 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
 
   @override
   Widget build(BuildContext context) {
-    final orderNo = widget.order['order_number'] ?? 'OK-0001';
+    final bool isOffline = widget.order['sync_status'] == 'pending' ||
+        widget.order['is_offline'] == true ||
+        (widget.order['order_number'] == null && widget.order['offline_order_no'] != null);
+    final orderNo = widget.order['order_number'] ?? widget.order['offline_order_no'] ?? widget.order['id'] ?? 'OK-0001';
     final String rawCustName = (widget.order['customer_name'] ??
             widget.order['customers']?['name'] ??
             widget.order['customer']?['name'] ??
@@ -510,11 +514,18 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
     final formattedDateTime = _formatNow();
     final formattedDeliveryDate = _formatDeliveryDate(deliveryDateStr);
 
-    final ticketBody = _buildTicket(orderNo, customerName, formattedDateTime, formattedDeliveryDate);
+    final ticketBody = _buildTicket(orderNo, customerName, formattedDateTime, formattedDeliveryDate, isOffline);
 
-    return Scaffold(
-      backgroundColor: const Color(0xFFF3F5FA),
-      body: SafeArea(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        ref.read(activeTabProvider.notifier).state = 0;
+        Navigator.of(context).popUntil((route) => route.isFirst);
+      },
+      child: Scaffold(
+        backgroundColor: const Color(0xFFF3F5FA),
+        body: SafeArea(
         child: Stack(
           children: [
             // Background gradient
@@ -533,16 +544,20 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
             ),
 
             // Top header
-            const Positioned(
+            Positioned(
               top: 16, left: 20, right: 20,
               child: Column(
                 children: [
-                  Text('Payment Confirmation',
+                  const Text('Payment Confirmation',
                     style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF0F172A)),
                   ),
-                  SizedBox(height: 2),
-                  Text('Order Received',
-                    style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Color(0xFF2563EB)),
+                  const SizedBox(height: 2),
+                  Text(isOffline ? 'Order Queued Offline' : 'Order Received',
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: isOffline ? const Color(0xFFD97706) : const Color(0xFF2563EB),
+                    ),
                   ),
                 ],
               ),
@@ -585,10 +600,11 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
           ],
         ),
       ),
+    ),
     );
   }
 
-  Widget _buildTicket(String orderNo, String customerName, String formattedDateTime, String formattedDeliveryDate) {
+  Widget _buildTicket(String orderNo, String customerName, String formattedDateTime, String formattedDeliveryDate, bool isOffline) {
     return PhysicalShape(
       clipper: const TicketReceiptClipper(notchRadius: 12.0, notchYFraction: 0.28, cornerRadius: 24.0),
       color: Colors.white,
@@ -659,13 +675,18 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
             // Thank you text
             FadeTransition(
               opacity: _contentFade,
-              child: const Column(
+              child: Column(
                 children: [
-                  Text('Thank you!', textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Color(0xFF0F172A), letterSpacing: -0.5)),
-                  SizedBox(height: 4),
-                  Text('Your order has been placed\nsuccessfully', textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w500, color: Color(0xFF64748B), height: 1.3)),
+                  Text(isOffline ? 'Order Queued Offline!' : 'Thank you!', textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Color(0xFF0F172A), letterSpacing: -0.5)),
+                  const SizedBox(height: 4),
+                  Text(
+                    isOffline
+                        ? 'Your order is saved locally and will\nsync automatically once connected'
+                        : 'Your order has been placed\nsuccessfully',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w500, color: Color(0xFF64748B), height: 1.3),
+                  ),
                 ],
               ),
             ),
@@ -686,7 +707,7 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Expanded(child: _metaColumn('TICKET ID', orderNo, CrossAxisAlignment.start)),
-                      _metaColumn('AMOUNT', '\u20B9${widget.grandTotal.toStringAsFixed(2)}', CrossAxisAlignment.end, isBold: true),
+                      _metaColumn('AMOUNT', '\u20B9${((widget.order['total_amount'] as num?)?.toDouble() ?? widget.grandTotal).toStringAsFixed(2)}', CrossAxisAlignment.end, isBold: true),
                     ],
                   ),
                   const SizedBox(height: 14),
@@ -730,12 +751,18 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
   }
 
   Widget _statusColumn() {
+    final bool isOffline = widget.order['sync_status'] == 'pending' ||
+        widget.order['is_offline'] == true ||
+        (widget.order['order_number'] == null && widget.order['offline_order_no'] != null);
     final status = widget.order['status']?.toString().toLowerCase();
     final orderType = widget.order['order_type']?.toString().toLowerCase();
     String statusText;
     Color statusColor;
 
-    if (status == 'pending') {
+    if (isOffline) {
+      statusText = 'Queued Offline';
+      statusColor = const Color(0xFFD97706);
+    } else if (status == 'pending') {
       if (orderType == 'pre-order') {
         statusText = 'Pre-Ordered';
         statusColor = Colors.orange[800]!;
@@ -761,7 +788,7 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
   Widget _customerPill(String customerName, String formattedDeliveryDate) {
     String displayName = customerName;
     if (customerName.isEmpty || customerName == 'Valued Customer' || customerName == 'Customer') {
-      displayName = Supabase.instance.client.auth.currentUser?.userMetadata?['name'] as String? ?? 'Valued Member';
+      displayName = Supabase.instance.client.auth.currentUser?.userMetadata?['name']?.toString() ?? 'Valued Member';
     }
 
     return Container(
@@ -837,7 +864,7 @@ class _OrderConfirmationScreenState extends ConsumerState<OrderConfirmationScree
                   minimumSize: const Size(0, 52),
                 ),
                 onPressed: () {
-                  ref.read(activeTabProvider.notifier).state = 3;
+                  ref.read(activeTabProvider.notifier).state = 2;
                   final String orderId = (widget.order['id'] ?? '').toString();
                   Navigator.pushReplacement(
                     context,

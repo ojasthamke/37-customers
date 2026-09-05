@@ -40,7 +40,7 @@ class OrderKartPolicies {
   static const String supportPhone = '+91 90211 07009';
   static const String supportEmail = 'supportorderkart@gmail.com';
   static const String repositoryUrl = 'https://github.com/ojasthamke/OrderKart-main';
-  static const String operatingAddress = 'Market Yard / Karve Road, Pune, Maharashtra 411038, India';
+  static const String operatingAddress = 'Market Yard, Yavatmal, Maharashtra 445001, India';
   static const String grievanceOfficer = 'Grievance Redressal Officer, OrderKart Compliance';
   static const String effectiveDate = '1 August 2026';
   static const String lastUpdatedDate = '31 August 2026';
@@ -75,11 +75,11 @@ class OrderKartPolicies {
         heading: '2. Information We Collect',
         content: 'To facilitate seamless doorstep delivery of fresh vegetables, fruits, and groceries, we collect the following limited information:',
         bulletPoints: [
-          'Personal Identifiers: Full name, primary mobile number, alternate contact number, and unique Customer Member Code assigned by the store.',
+          'Personal Identifiers: Full name, primary mobile number, alternate contact number, email address (when using Google Sign-In), and unique Customer Member Code assigned by the store.',
           'Delivery Details: Delivery address, house/flat number, road/street name, sub-road, and registered delivery area name.',
           'Order & Transaction Records: Order history, items purchased, quantities, pricing snapshots, order timestamps, and delivery schedules.',
           'Device & App Information: Firebase Cloud Messaging (FCM) device registration tokens (for delivery and order update notifications) and basic network connectivity status (WiFi/Cellular/Offline).',
-          'Security Tokens: Session authentication tokens stored securely on your device using encrypted storage.',
+          'Security Tokens: Session authentication tokens and Google OAuth identity tokens stored securely on your device using encrypted storage.',
         ],
       ),
       PolicySection(
@@ -109,7 +109,7 @@ class OrderKartPolicies {
         content: 'We partner with trusted, industry-standard technology providers who process data under strict confidentiality obligations:',
         bulletPoints: [
           'Supabase Inc. (Backend Cloud Database & Authentication): Data stored securely in enterprise-grade PostgreSQL with TLS 1.3 transit encryption and AES-256 rest encryption.',
-          'Google Firebase Cloud Messaging (FCM): Used strictly to dispatch order updates and delivery notifications to your device.',
+          'Google Identity & Firebase Services: Used securely for Google Sign-In authentication and Firebase Cloud Messaging (FCM) push notifications.',
           'Google Fonts: Provides clean typography rendered inside the mobile application.',
         ],
       ),
@@ -170,6 +170,17 @@ class OrderKartPolicies {
         heading: '7. Limitation of Liability',
         content: 'To the maximum extent permitted by applicable law, OrderKart and its operating entities shall not be liable for indirect, incidental, or consequential damages resulting from delivery delays caused by force majeure events, severe weather conditions, or unforeseen agricultural market shortages.',
       ),
+      PolicySection(
+        heading: '8. Development Stage, Calculation & System Accuracy Disclaimer',
+        content: 'OrderKart is under active development and continuous improvement to enhance user experience and service reliability. While we make all reasonable commercial efforts to ensure that all information, catalog prices, item quantities, arithmetic calculations, delivery charges, order totals, and stock availability displayed across the application are accurate and up-to-date, occasional technical glitches, software anomalies, or display errors may occur.',
+        bulletPoints: [
+          'Scope of Potential Discrepancies: Technical errors may occasionally result in inaccurate price representations, quantity miscalculations, rounded total discrepancies, outdated stock availability statuses, or erroneous system-generated order details.',
+          'Pre-Confirmation Review: Customers are strongly advised to review their itemized cart, selected quantities, delivery addresses, and calculated order totals before placing and confirming any order.',
+          'Reporting Discrepancies: If you observe an incorrect price, quantity, abnormal calculation, or system malfunction, please notify our support team promptly via WhatsApp (+91 90211 07009) or email (supportorderkart@gmail.com).',
+          'Investigation & Updates: We will review reported issues in good faith and, where appropriate, rectify the system, update catalog data, or provide necessary billing adjustments. Please note that technical resolutions or system updates may require diagnostic time and cannot be guaranteed to occur instantaneously.',
+          'Limitation of Liability: To the maximum extent permitted by applicable law, OrderKart, its operators, and affiliates shall not be held liable for any direct, indirect, incidental, or consequential losses, inconvenience, or damages arising solely from temporary technical errors, calculation discrepancies, inaccurate app data, or development-stage software defects. Nothing in this disclaimer shall exclude or limit any statutory consumer rights, warranties, or liabilities that cannot be lawfully excluded or limited under applicable Indian laws, nor does it diminish our Doorstep Inspection and Refund Policy for delivered physical produce.',
+        ],
+      ),
     ],
   );
 
@@ -204,12 +215,12 @@ class OrderKartPolicies {
         ],
       ),
       PolicySection(
-        heading: '4. Refund Processing & Mode of Settlement',
-        content: 'Since all payments are settled on delivery, refunds are handled transparently:',
+        heading: '4. Refund Method & Processing Timelines',
+        content: 'Refunds are issued via one of the following methods based on your preference:',
         bulletPoints: [
-          'Doorstep Adjustment: The payable bill is immediately adjusted downward for any returned item.',
-          'UPI / Cash Refund: For prepaid credits or digital UPI settlements, refunds are processed directly to your UPI ID or phone number within 1-2 business days.',
-          'Account Credit: You may opt to keep the refunded amount as a store credit, which automatically deducts from your future purchase balance.',
+          'Store Ledger Credit (Instant): Added to your OrderKart customer balance immediately for deduction on your next order.',
+          'Original Payment Method (UPI/Bank): Processed within 2 to 5 business days via standard banking channels.',
+          'Cash Adjustment: Adjusted on the spot if payment was made via Cash on Delivery.',
         ],
       ),
     ],
@@ -227,22 +238,20 @@ class OrderKartPolicies {
     sections: [
       PolicySection(
         heading: '1. Delivery Coverage & Area Routing',
-        content: 'OrderKart operates a structured route-based delivery network across designated areas in Pune, Maharashtra. Delivery days and time windows are assigned based on your registered area and road sector.',
+        content: 'OrderKart operates a structured route-based delivery network across designated areas in Yavatmal, Maharashtra. Delivery days and time windows are assigned based on your registered area and road sector.',
       ),
       PolicySection(
         heading: '2. Delivery Modes & Timelines',
         content: 'We offer two convenient delivery options:',
         bulletPoints: [
-          'Standard Scheduled Delivery: Farm-harvested produce delivered on your assigned area delivery days (typically morning 7:00 AM - 12:00 PM).',
+          'Standard Scheduled Delivery: Farm-harvested produce delivered on your assigned area delivery days (typically morning 7:00 AM - 12:00 PM). We charge a nominal delivery fee of ₹10 to ₹15 on standard delivery.',
           'Quick Order (Order Now): Priority delivery within 1 to 2 hours of order placement during active store operating hours.',
         ],
       ),
       PolicySection(
-        heading: '3. Delivery Charges & Free Delivery Threshold',
+        heading: '3. Express Handling & Quick Delivery',
         content: 'Our shipping fees are transparent and straightforward:',
         bulletPoints: [
-          'Standard Delivery - Orders ₹300 and above: FREE Delivery (₹0).',
-          'Standard Delivery - Orders below ₹300: Nominal delivery charge of ₹30.',
           'Quick Delivery (1-2 Hours): Flat priority handling fee (₹20 - ₹30) applied to ensure express fulfillment.',
         ],
       ),
@@ -335,6 +344,10 @@ class OrderKartPolicies {
         heading: '4. Weight & Unit Measurements',
         content: 'Items are priced according to standard metric units: per Kilogram (kg), 500 grams (g), 250 grams, Dozen (doz), or Piece (pcs). All fractional unit calculations are computed precisely with zero hidden surcharges.',
       ),
+      PolicySection(
+        heading: '5. Calculation Review & Error Reporting',
+        content: 'Because the application is continuously updated, users are encouraged to verify their subtotal, rounding adjustments, and final bill amount on the checkout screen before order placement. If an evident calculation or display error is noticed, please report it to our customer support team (+91 90211 07009) so that we may review and address the issue.',
+      ),
     ],
   );
 
@@ -364,7 +377,7 @@ class OrderKartPolicies {
         bulletPoints: [
           'Designation: Grievance Redressal Officer',
           'Entity: OrderKart Fresh Foods & Essentials',
-          'Address: Market Yard / Karve Road, Pune, Maharashtra 411038, India',
+          'Address: Market Yard, Yavatmal, Maharashtra 445001, India',
           'Email: grievance@aplibhaji.com (or supportorderkart@gmail.com)',
           'Phone: +91 90211 07009',
         ],

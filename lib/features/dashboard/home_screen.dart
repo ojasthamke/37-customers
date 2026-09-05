@@ -10,7 +10,6 @@ import '../auth/auth_provider.dart';
 import '../auth/login_screen.dart';
 import '../catalog/catalog_provider.dart';
 import '../catalog/product_listing_screen.dart';
-import '../catalog/order_now_screen.dart';
 import '../cart/cart_provider.dart';
 import '../cart/cart_screen.dart';
 import '../order/my_orders_screen.dart';
@@ -24,7 +23,6 @@ import '../../core/services/notification_service.dart';
 import '../../core/database/providers.dart';
 import '../../core/widgets/glass_container.dart';
 import '../../core/widgets/skeleton_loader.dart';
-import '../../core/widgets/animated_slashed_text.dart';
 import 'schedule_banner.dart';
 
 final activeTabProvider = StateProvider<int>((ref) => 0);
@@ -132,7 +130,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
     try {
       final client = Supabase.instance.client;
-      final response = await client.from('products').select().inFilter('id', productIds);
+      final response = await client.from('products').select().inFilter('id', productIds).timeout(const Duration(seconds: 10));
       if (!context.mounted) return;
       dismissLoading();
       final currentProducts = List<Map<String, dynamic>>.from(response);
@@ -193,18 +191,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         _setupNotificationListener();
       }
     });
-    _autoScrollTimer = Timer(const Duration(seconds: 8), () {
-      if (mounted && _currentTab == 0) {
-        _scrollToProductsSection();
-      }
-    });
   }
 
   void _setupNotificationListener() {
     try {
       final customer = ref.read(authProvider).customer;
       final currentCustId = customer?['id']?.toString();
-      NotificationService.instance.startRealtimeNotificationSync(customerId: currentCustId);
+      final currentAreaId = customer?['area_id']?.toString();
+      NotificationService.instance.startRealtimeNotificationSync(
+        customerId: currentCustId,
+        areaId: currentAreaId,
+      );
     } catch (e) {
       debugPrint('Failed to set up notification sync: $e');
     }
@@ -334,30 +331,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   static const Color borderPillColor = Color(0xFFD4AF37);
 
   void _onTabChanged(int index) {
-    if (index == _currentTab) return;
+    if (_currentTab == index) return;
 
-    // Cart Navigation Constraints
     if (index == 1) {
       ref.read(cartOriginTabProvider.notifier).state = _currentTab;
-
-      final settingsAsync = ref.read(appSettingsProvider);
-      final isQuickOrderClosed = isOrderNowClosed(settingsAsync.valueOrNull);
-
-      if (isQuickOrderClosed) {
-        // If Quick Order is closed, strictly force view back to normal cart
-        ref.read(isViewingQuickOrderCartProvider.notifier).state = false;
-      } else {
-        // ONLY if user is switching from Order Now / NOW tab (index 2), open the Quick Order cart
-        if (_currentTab == 2) {
-          ref.read(isViewingQuickOrderCartProvider.notifier).state = true;
-        } else {
-          ref.read(isViewingQuickOrderCartProvider.notifier).state = false;
-        }
-      }
-    }
-
-    // Switch back to normal cart if leaving the Quick Order flow (NOW or Cart)
-    if (index != 1 && index != 2) {
       ref.read(isViewingQuickOrderCartProvider.notifier).state = false;
     }
 
@@ -367,11 +344,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   void _handleBackPressed() {
-    if (_currentTab == 1) {
-      final originTab = ref.read(cartOriginTabProvider);
-      _onTabChanged(originTab);
-    } else if (_currentTab != 0) {
-      _onTabChanged(0);
+    if (_currentTab != 0) {
+      final origin = ref.read(cartOriginTabProvider);
+      if (_currentTab == 1 && origin != 1) {
+        _onTabChanged(origin);
+      } else {
+        _onTabChanged(0);
+      }
     }
   }
 
@@ -444,20 +423,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final normalCart = ref.watch(cartProvider);
     final normalCartCount = normalCart.itemCount;
     final normalCartSubtotal = normalCart.subtotal;
-    final quickCartCount = ref.watch(quickCartProvider.select((c) => c.itemCount));
-    final totalCartCount = normalCartCount + quickCartCount;
 
     // Body widgets corresponding to tabs
     final List<Widget> tabs = [
       _buildHomeTab(),
       CartScreen(
         showAppBar: false,
-        onBrowseClicked: () {
-          final originTab = ref.read(cartOriginTabProvider);
-          _onTabChanged(originTab == 2 ? 2 : 0);
-        },
+        onBrowseClicked: () => _onTabChanged(0),
       ),
-      const OrderNowScreen(),
       const MyOrdersScreen(showAppBar: false),
       const ProfileScreen(showAppBar: false),
     ];
@@ -465,7 +438,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final List<String> appBarTitles = [
       'ApliBhaji',
       'My Cart',
-      'Order Now ⚡',
       'My Orders',
       'My Profile',
     ];
@@ -596,7 +568,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     _onTabChanged(1);
                   },
                 ),
-                if (totalCartCount > 0)
+                if (normalCartCount > 0)
                   Positioned(
                     right: 4,
                     top: 4,
@@ -608,7 +580,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                       ),
                       constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
                       child: Text(
-                        totalCartCount.toString(),
+                        normalCartCount.toString(),
                         style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
                         textAlign: TextAlign.center,
                       ),
@@ -721,46 +693,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
                 _buildNavItem(0, Icons.home_outlined, Icons.home_rounded, 'Home'),
-                _buildNavItem(1, Icons.shopping_cart_outlined, Icons.shopping_cart_rounded, 'Cart', badgeCount: totalCartCount),
-                GestureDetector(
-                  onTap: () {
-                    HapticFeedback.lightImpact();
-                    _onTabChanged(2);
-                  },
-                  child: Container(
-                    width: 54,
-                    height: 54,
-                    decoration: BoxDecoration(
-                      color: Colors.orange,
-                      shape: BoxShape.circle,
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.orange.withValues(alpha: 0.4),
-                          blurRadius: 8,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
-                      border: Border.all(color: Colors.white, width: 2),
-                    ),
-                    child: const Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.bolt_rounded, color: Colors.white, size: 22),
-                        Text(
-                          'NOW',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 7.5,
-                            fontWeight: FontWeight.w900,
-                            letterSpacing: 0.5,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                _buildNavItem(3, Icons.receipt_long_outlined, Icons.receipt_long_rounded, 'Orders'),
-                _buildNavItem(4, Icons.person_outline_rounded, Icons.person_rounded, 'Profile'),
+                _buildNavItem(1, Icons.shopping_cart_outlined, Icons.shopping_cart_rounded, 'Cart', badgeCount: normalCartCount),
+                _buildNavItem(2, Icons.receipt_long_outlined, Icons.receipt_long_rounded, 'Orders'),
+                _buildNavItem(3, Icons.person_outline_rounded, Icons.person_rounded, 'Profile'),
               ],
             ),
           ),
@@ -905,6 +840,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       onRefresh: () async {
         ref.invalidate(categoriesProvider);
         ref.invalidate(popularProductsProvider);
+        ref.invalidate(lastOrderProvider);
+        ref.invalidate(orderListProvider);
+        ref.invalidate(appSettingsProvider);
+        await ref.read(authProvider.notifier).loadCurrentCustomer();
       },
       child: SingleChildScrollView(
         controller: _homeScrollController,
@@ -1521,14 +1460,89 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   return const Center(child: Text('No products available.'));
                 }
 
-                return ListView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: products.length,
-                  itemBuilder: (context, index) {
-                    final p = products[index];
-                    return PopularProductCard(p: p);
-                  },
+                final availableProducts = <Map<String, dynamic>>[];
+                final unavailableProducts = <Map<String, dynamic>>[];
+
+                for (final p in products) {
+                  final rawStockNum = (p['stock'] is num)
+                      ? (p['stock'] as num).toDouble()
+                      : double.tryParse(p['stock']?.toString() ?? '');
+                  final isAvailable = (p['is_available'] == null ||
+                          p['is_available'] == true ||
+                          p['is_available'] == 1 ||
+                          p['is_available']?.toString() == '1' ||
+                          p['is_available']?.toString().toLowerCase() == 'true') &&
+                      (p['is_enabled'] != false &&
+                          p['is_enabled'] != 0 &&
+                          p['is_enabled']?.toString() != '0' &&
+                          p['is_enabled']?.toString().toLowerCase() != 'false') &&
+                      (rawStockNum == null || rawStockNum > 0);
+                  if (isAvailable) {
+                    availableProducts.add(p);
+                  } else {
+                    unavailableProducts.add(p);
+                  }
+                }
+
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (availableProducts.isNotEmpty)
+                      ListView.builder(
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        itemCount: availableProducts.length,
+                        itemBuilder: (context, index) {
+                          final p = availableProducts[index];
+                          return PopularProductCard(p: p);
+                        },
+                      ),
+                    if (unavailableProducts.isNotEmpty) ...[
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 14.0),
+                        child: Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 5),
+                              decoration: BoxDecoration(
+                                color: Colors.orange.withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                    color: Colors.orange.withValues(alpha: 0.35)),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.remove_shopping_cart_rounded,
+                                      size: 14, color: Colors.orange),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    'CURRENTLY UNAVAILABLE (${unavailableProducts.length})',
+                                    style: TextStyle(
+                                      fontSize: 11.5,
+                                      fontWeight: FontWeight.w800,
+                                      color: Colors.orange.shade800,
+                                      letterSpacing: 0.5,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      ListView.builder(
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        itemCount: unavailableProducts.length,
+                        itemBuilder: (context, index) {
+                          final p = unavailableProducts[index];
+                          return PopularProductCard(p: p);
+                        },
+                      ),
+                    ],
+                  ],
                 );
               },
             ),
@@ -1711,6 +1725,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final name = categoryName.toLowerCase();
     if (name.contains('veg')) return Icons.eco_rounded;
     if (name.contains('fruit')) return Icons.apple_rounded;
+    if (name.contains('flower') || name.contains('pooja') || name.contains('puja') || name.contains('phool')) {
+      return Icons.local_florist_rounded;
+    }
     if (name.contains('herb') || name.contains('season')) return Icons.spa_rounded;
     if (name.contains('dairy') || name.contains('milk')) return Icons.egg_alt_rounded;
     return Icons.category_rounded;
@@ -1720,6 +1737,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final name = categoryName.toLowerCase();
     if (name.contains('veg')) return const Color(0xFFE8F5E9); // soft green
     if (name.contains('fruit')) return const Color(0xFFFFF1F1); // soft pink/orange
+    if (name.contains('flower') || name.contains('pooja') || name.contains('puja') || name.contains('phool')) {
+      return const Color(0xFFFFF3E0); // soft warm marigold/floral orange
+    }
     if (name.contains('herb') || name.contains('season')) return const Color(0xFFE0F2F1); // soft teal
     if (name.contains('dairy') || name.contains('milk')) return const Color(0xFFFFF8E1); // soft cream
     return const Color(0xFFF5F5F5); // soft grey
@@ -1731,20 +1751,25 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     for (var item in items) {
       final pid = item['product_id']?.toString() ?? '';
       if (pid.isEmpty) continue;
-      final currentProd = currentProducts.firstWhere((p) => p['id']?.toString() == pid, orElse: () => {});
-      final double stock = (currentProd['stock'] is num)
+      final currentProd = currentProducts.firstWhere(
+        (p) => p['id']?.toString().trim().toLowerCase() == pid.trim().toLowerCase(),
+        orElse: () => {},
+      );
+      final rawStockNum = (currentProd['stock'] is num)
           ? (currentProd['stock'] as num).toDouble()
-          : (double.tryParse(currentProd['stock']?.toString() ?? '') ?? 0.0);
+          : double.tryParse(currentProd['stock']?.toString() ?? '');
       if (currentProd.isEmpty ||
           currentProd['is_enabled'] == false ||
+          currentProd['is_enabled'] == 0 ||
           currentProd['is_available'] == false ||
-          stock <= 0) {
+          currentProd['is_available'] == 0 ||
+          (rawStockNum != null && rawStockNum <= 0)) {
         continue; // Skip out-of-stock and unavailable products
       }
       final double rawQty = (item['quantity'] is num)
           ? (item['quantity'] as num).toDouble()
           : (double.tryParse(item['quantity']?.toString() ?? '') ?? 1.0);
-      final double clampedQty = rawQty > stock ? stock : rawQty;
+      final double clampedQty = (rawStockNum != null && rawQty > rawStockNum) ? rawStockNum : rawQty;
       final double price = (currentProd['price'] is num)
           ? (currentProd['price'] as num).toDouble()
           : (double.tryParse(currentProd['price']?.toString() ?? '') ?? 0.0);
@@ -1755,6 +1780,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         'price': price,
         'unit': currentProd['unit'] ?? item['unit'] ?? '',
         'quantity': (clampedQty * 1000).round() / 1000.0,
+        'stock': rawStockNum,
         'image_path': currentProd['image_path'] ?? item['image_path'],
       };
     }
@@ -1857,6 +1883,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                             final price = (item['price'] as num?)?.toDouble() ?? 0.0;
                             final unit = item['unit']?.toString() ?? '';
                             final qty = (item['quantity'] as num?)?.toDouble() ?? 1.0;
+                            final itemStock = (item['stock'] as num?)?.toDouble();
 
                             return Padding(
                               padding: const EdgeInsets.symmetric(vertical: 8.0),
@@ -1902,21 +1929,28 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                         style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                                       ),
                                       IconButton(
-                                        icon: const Icon(Icons.add_circle_outline_rounded, color: Color(0xFF1B3624)),
+                                        icon: Icon(
+                                          Icons.add_circle_outline_rounded,
+                                          color: (itemStock != null && qty >= itemStock) ? const Color(0xFFCBD5E1) : const Color(0xFF1B3624),
+                                        ),
                                         tooltip: 'Increase quantity',
-                                        onPressed: () {
-                                          setState(() {
-                                            final double roundedQty = (qty * 1000).round() / 1000.0;
-                                            final steps = getQuantitySteps(unit);
-                                            final nextIndex = steps.indexWhere((s) => s > roundedQty + 0.001);
-                                            if (nextIndex != -1) {
-                                              item['quantity'] = steps[nextIndex];
-                                            } else {
-                                              item['quantity'] = ((roundedQty + 1.0) * 1000).round() / 1000.0;
-                                            }
-                                          });
-                                        },
-                                      ),
+                                        onPressed: (itemStock != null && qty >= itemStock)
+                                            ? null
+                                             : () {
+                                                 setState(() {
+                                                   final double roundedQty = (qty * 1000).round() / 1000.0;
+                                                   final steps = getQuantitySteps(unit);
+                                                   final nextIndex = steps.indexWhere((s) => s > roundedQty + 0.001);
+                                                   double nextQty = (nextIndex != -1)
+                                                       ? steps[nextIndex]
+                                                       : ((roundedQty + 1.0) * 1000).round() / 1000.0;
+                                                   if (itemStock != null && nextQty > itemStock) {
+                                                     nextQty = itemStock;
+                                                   }
+                                                   item['quantity'] = nextQty;
+                                                 });
+                                               },
+                                       ),
                                     ],
                                   )
                                 ],
@@ -2053,10 +2087,28 @@ class PopularProductCard extends ConsumerWidget {
     final String productId = p['id']?.toString() ?? '';
     final existingCartItem = ref.watch(cartProvider.select((state) => state.items[productId]));
     final isInCart = existingCartItem != null;
-    final double stock = (p['stock'] is num)
+    final rawStockNum = (p['stock'] is num)
         ? (p['stock'] as num).toDouble()
-        : (double.tryParse(p['stock']?.toString() ?? '') ?? 0.0);
-    final isAvailable = (p['is_available'] == true || p['is_available'] == 1 || p['is_available']?.toString() == '1' || p['is_available']?.toString().toLowerCase() == 'true') && stock > 0;
+        : double.tryParse(p['stock']?.toString() ?? '');
+    final isAvailable = (p['is_available'] == null ||
+            p['is_available'] == true ||
+            p['is_available'] == 1 ||
+            p['is_available']?.toString() == '1' ||
+            p['is_available']?.toString().toLowerCase() == 'true') &&
+        (p['is_enabled'] != false &&
+            p['is_enabled'] != 0 &&
+            p['is_enabled']?.toString() != '0' &&
+            p['is_enabled']?.toString().toLowerCase() != 'false') &&
+        (rawStockNum == null || rawStockNum > 0);
+    final bool isExplicitlyUnavailable = !(p['is_available'] == null ||
+            p['is_available'] == true ||
+            p['is_available'] == 1 ||
+            p['is_available']?.toString() == '1' ||
+            p['is_available']?.toString().toLowerCase() == 'true') ||
+        (p['is_enabled'] == false ||
+            p['is_enabled'] == 0 ||
+            p['is_enabled']?.toString() == '0' ||
+            p['is_enabled']?.toString().toLowerCase() == 'false');
     final name = p['name']?.toString() ?? '';
     final double rawPrice = (p['price'] is num)
         ? (p['price'] as num).toDouble()
@@ -2098,16 +2150,15 @@ class PopularProductCard extends ConsumerWidget {
                 ),
                 const SizedBox(height: 10),
                 // Title
-                FittedBox(
-                  fit: BoxFit.scaleDown,
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    name,
-                    style: GoogleFonts.playfairDisplay(
-                      color: const Color(0xFF1B3624),
-                      fontWeight: FontWeight.bold,
-                      fontSize: 21,
-                    ),
+                Text(
+                  name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.inter(
+                    color: const Color(0xFF1B3624),
+                    fontWeight: FontWeight.w700,
+                    fontSize: 18,
+                    letterSpacing: -0.2,
                   ),
                 ),
                 const SizedBox(height: 10),
@@ -2118,21 +2169,22 @@ class PopularProductCard extends ConsumerWidget {
                     textBaseline: TextBaseline.alphabetic,
                     children: [
                       Text(
-                        '₹${(price / 4).toStringAsFixed(0)}/250g',
-                        style: GoogleFonts.outfit(
+                        '₹${_formatCurrency(price / 4)}/250g',
+                        style: GoogleFonts.inter(
                           color: const Color(0xFF1B3624),
-                          fontWeight: FontWeight.bold,
-                          fontSize: 21,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 20,
                         ),
                       ),
                       if (marketPrice > price) ...[
                         const SizedBox(width: 8),
-                        AnimatedSlashedText(
-                          text: '₹${(marketPrice / 4).toStringAsFixed(0)}',
+                        Text(
+                          '₹${_formatCurrency(marketPrice / 4)}',
                           style: GoogleFonts.inter(
                             color: Colors.grey[600],
-                            fontWeight: FontWeight.bold,
+                            fontWeight: FontWeight.w600,
                             fontSize: 13,
+                            decoration: TextDecoration.lineThrough,
                           ),
                         ),
                       ],
@@ -2142,7 +2194,7 @@ class PopularProductCard extends ConsumerWidget {
                   Row(
                     children: [
                       Text(
-                        '₹${price.toStringAsFixed(0)} per kg',
+                        '₹${_formatCurrency(price)} per kg',
                         style: GoogleFonts.inter(
                           color: const Color(0xFF2E6F40),
                           fontWeight: FontWeight.w600,
@@ -2151,12 +2203,13 @@ class PopularProductCard extends ConsumerWidget {
                       ),
                       if (marketPrice > price) ...[
                         const SizedBox(width: 8),
-                        AnimatedSlashedText(
-                          text: '₹${marketPrice.toStringAsFixed(0)}',
+                        Text(
+                          '₹${_formatCurrency(marketPrice)}',
                           style: GoogleFonts.inter(
                             color: Colors.grey[600],
-                            fontWeight: FontWeight.bold,
+                            fontWeight: FontWeight.w600,
                             fontSize: 13,
+                            decoration: TextDecoration.lineThrough,
                           ),
                         ),
                       ],
@@ -2168,21 +2221,22 @@ class PopularProductCard extends ConsumerWidget {
                     textBaseline: TextBaseline.alphabetic,
                     children: [
                       Text(
-                        '₹${price.toStringAsFixed(0)}/$unit',
-                        style: GoogleFonts.outfit(
+                        '₹${_formatCurrency(price)}/$unit',
+                        style: GoogleFonts.inter(
                           color: const Color(0xFF1B3624),
-                          fontWeight: FontWeight.bold,
-                          fontSize: 21,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 20,
                         ),
                       ),
                       if (marketPrice > price) ...[
                         const SizedBox(width: 8),
-                        AnimatedSlashedText(
-                          text: '₹${marketPrice.toStringAsFixed(0)}',
+                        Text(
+                          '₹${_formatCurrency(marketPrice)}',
                           style: GoogleFonts.inter(
                             color: Colors.grey[600],
-                            fontWeight: FontWeight.bold,
+                            fontWeight: FontWeight.w600,
                             fontSize: 13,
+                            decoration: TextDecoration.lineThrough,
                           ),
                         ),
                       ],
@@ -2256,8 +2310,8 @@ class PopularProductCard extends ConsumerWidget {
                               ],
                             ),
                             child: Text(
-                              'OUT OF STOCK',
-                              style: GoogleFonts.outfit(
+                              isExplicitlyUnavailable ? 'UNAVAILABLE' : 'OUT OF STOCK',
+                              style: GoogleFonts.inter(
                                 color: Colors.white,
                                 fontWeight: FontWeight.w900,
                                 fontSize: 10,
@@ -2347,7 +2401,8 @@ class PopularProductCard extends ConsumerWidget {
                         onPressed: () {
                           HapticFeedback.lightImpact();
                           final step = _getStepSize(unit);
-                          ref.read(cartProvider.notifier).updateQuantity(productId, existingCartItem.quantity - step);
+                          final nextQty = ((existingCartItem.quantity - step) * 1000).round() / 1000.0;
+                          ref.read(cartProvider.notifier).updateQuantity(productId, nextQty);
                         },
                       ),
                       GestureDetector(
@@ -2378,6 +2433,20 @@ class PopularProductCard extends ConsumerWidget {
                         constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
                         onPressed: () {
                           HapticFeedback.lightImpact();
+                          final step = _getStepSize(unit);
+                          if (rawStockNum != null && (rawStockNum <= 0 || existingCartItem.quantity >= rawStockNum || existingCartItem.quantity + step > rawStockNum)) {
+                            ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(rawStockNum <= 0
+                                    ? 'This item is currently out of stock.'
+                                    : 'Cannot add more. Maximum available stock is ${_formatSelectorQuantity(rawStockNum, unit)}.'),
+                                backgroundColor: const Color(0xFFDC2626),
+                                duration: const Duration(seconds: 2),
+                              ),
+                            );
+                            return;
+                          }
                           showQuantitySelectionBottomSheet(
                             context: context,
                             ref: ref,
@@ -2470,3 +2539,15 @@ double _getStepSize(String unit) {
   if (unitLower == 'g' || unitLower == 'gram' || unitLower == 'grams') return 250.0;
   return 1.0;
 }
+
+String _formatCurrency(double amount) {
+  if ((amount - amount.roundToDouble()).abs() < 0.01) {
+    return amount.round().toString();
+  }
+  final s = amount.toStringAsFixed(2);
+  if (s.endsWith('.00')) {
+    return amount.round().toString();
+  }
+  return s;
+}
+

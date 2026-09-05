@@ -48,8 +48,8 @@ class CategoriesScreen extends ConsumerWidget {
                       context,
                       MaterialPageRoute(
                         builder: (context) => ProductListingScreen(
-                          initialCategoryId: cat['id'],
-                          initialCategoryName: cat['name'],
+                          initialCategoryId: cat['id']?.toString(),
+                          initialCategoryName: cat['name']?.toString(),
                         ),
                       ),
                     );

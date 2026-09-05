@@ -1,10 +1,9 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:uuid/uuid.dart';
 import '../auth/auth_provider.dart';
+import '../auth/login_screen.dart';
 import '../cart/cart_provider.dart';
 import '../catalog/catalog_provider.dart';
 import '../order/order_provider.dart';
@@ -13,8 +12,12 @@ import '../../core/widgets/quantity_selector.dart';
 import '../../core/widgets/ambient_background.dart';
 import '../../core/services/notification_service.dart';
 import '../../core/utils/schedule_helper.dart';
+import '../../core/utils/product_helper.dart';
 import 'order_confirmation_screen.dart';
+import '../../core/widgets/delivery_address_edit_sheet.dart';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
+import '../../core/services/crash_observability_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 class CheckoutScreen extends ConsumerStatefulWidget {
@@ -25,10 +28,28 @@ class CheckoutScreen extends ConsumerStatefulWidget {
 }
 
 class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
-  final String _idempotencyKey = const Uuid().v4();
   bool _isPlacingOrder = false;
 
   ScheduleDetails? _scheduleDetails;
+
+  void _refreshSchedule() {
+    final customer = ref.read(authProvider).customer;
+    if (customer != null) {
+      final orderDays = customer['delivery_schedule'] as List<dynamic>?;
+      final cutoffStr = customer['cutoff_time']?.toString();
+
+      final settings = ref.read(appSettingsProvider).valueOrNull;
+      final bool isClosed = isStoreClosed(settings);
+
+      setState(() {
+        _scheduleDetails = AreaScheduleHelper.calculateDetails(
+          orderDays,
+          cutoffTimeStr: cutoffStr,
+          isStoreClosed: isClosed,
+        );
+      });
+    }
+  }
 
   @override
   void initState() {
@@ -58,24 +79,58 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
     return "${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}";
   }
 
+  double _parsePrice(dynamic val) {
+    if (val is num) return val.toDouble();
+    if (val != null) return double.tryParse(val.toString()) ?? 0.0;
+    return 0.0;
+  }
+
   void _placeOrder() async {
     if (_isPlacingOrder) return;
 
     final customer = ref.read(authProvider).customer;
-    if (customer == null) return;
+    final bool isGuest = customer == null ||
+        customer['is_guest'] == true ||
+        customer['is_guest'] == 1 ||
+        customer['is_guest']?.toString() == '1' ||
+        customer['is_guest']?.toString().toLowerCase() == 'true';
 
-    final cart = ref.read(activeCartProvider);
-    final isOrderNow = cart.items.values.any((item) => item.isOrderNow);
-
-    var details = _scheduleDetails;
-    if (!isOrderNow && (details == null || details.state == ScheduleState.noSchedule)) {
+    if (isGuest) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('No delivery schedule available for your area.'),
-          backgroundColor: Colors.red,
+        SnackBar(
+          content: const Text('Please log in or register to place your order.'),
+          backgroundColor: const Color(0xFF1B3624),
+          action: SnackBarAction(
+            label: 'LOGIN',
+            textColor: Colors.amber,
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const LoginScreen()),
+              );
+            },
+          ),
+          duration: const Duration(seconds: 4),
         ),
       );
       return;
+    }
+
+    final cart = ref.read(activeCartProvider);
+    if (cart.items.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Your cart is empty. Please add items to place an order.'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+    final bool isQuickOrder = cart.items.values.any((i) => i.isOrderNow);
+
+    var details = _scheduleDetails;
+    if (!isQuickOrder && (details == null || details.state == ScheduleState.noSchedule)) {
+      // Resilient fallback: allow ordering with next day delivery if area schedule is unconfigured
     }
 
     setState(() {
@@ -84,140 +139,158 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
 
     // Stock, Availability & Price Validation before placing order
     try {
-      final client = Supabase.instance.client;
-      final List<dynamic> remoteProducts = await client
-          .from('products')
-          .select('id, price, is_available, is_enabled, description, order_now_price, order_now_stock, order_now_is_available')
-          .inFilter('id', cart.items.keys.toList());
+      final connectivityResults = await Connectivity().checkConnectivity();
+      final bool isOffline = connectivityResults.every((r) => r == ConnectivityResult.none);
 
-      // Check if any cart item was deleted from the server
-      final foundIds = remoteProducts.map((p) => p['id']?.toString()).toSet();
-      for (final localId in cart.items.keys) {
-        if (!foundIds.contains(localId)) {
-          if (!mounted) return;
-          setState(() { _isPlacingOrder = false; });
-          final deletedItem = cart.items[localId];
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('${deletedItem?.productName ?? 'A product'} is no longer available. Please remove it from cart.'),
-              backgroundColor: Colors.red,
-            ),
-          );
-          return; // Block order placement!
-        }
-      }
+      if (!isOffline) {
+        final client = Supabase.instance.client;
+        final List<dynamic> remoteProducts = await client
+            .from('products')
+            .select('*')
+            .inFilter('id', cart.items.keys.toList())
+            .timeout(const Duration(seconds: 10));
 
-      bool priceChanged = false;
-      for (final p in remoteProducts) {
-        final String id = p['id'] as String;
-        final localItem = cart.items[id];
-        if (localItem == null) continue;
-
-        final bool isAvailable = localItem.isOrderNow
-            ? ((p['order_now_is_available'] == null || p['order_now_is_available'] == true || p['order_now_is_available'] == 1) &&
-                (p['is_enabled'] == null || p['is_enabled'] == true || p['is_enabled'] == 1))
-            : ((p['is_available'] == true || p['is_available'] == 1) &&
-                (p['is_enabled'] == null || p['is_enabled'] == true || p['is_enabled'] == 1));
-
-        if (!isAvailable) {
-          if (!mounted) return;
-          setState(() { _isPlacingOrder = false; });
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('${localItem.productName} is currently out of stock. Please remove it from cart.'),
-              backgroundColor: Colors.red,
-            ),
-          );
-          return; // Block order placement!
-        }
-
-        // Check stock levels
-        double stock = 0.0;
-        if (localItem.isOrderNow) {
-          stock = (p['order_now_stock'] as num?)?.toDouble() ?? 0.0;
-        } else {
-          final descStr = p['description']?.toString() ?? '';
-          if (descStr.isNotEmpty && descStr.startsWith('{')) {
-            try {
-              final descObj = jsonDecode(descStr);
-              if (descObj['stock'] != null) {
-                stock = (descObj['stock'] as num).toDouble();
-              }
-            } catch (_) {}
-          } else if (p['stock'] != null) {
-            stock = (p['stock'] as num).toDouble();
+        // Check if any cart item was deleted from the server
+        final foundIds = remoteProducts.map((p) => p['id']?.toString()).toSet();
+        for (final localId in cart.items.keys) {
+          if (!foundIds.contains(localId)) {
+            if (!mounted) return;
+            setState(() { _isPlacingOrder = false; });
+            final deletedItem = cart.items[localId];
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('${deletedItem?.productName ?? 'A product'} is no longer available. Please remove it from cart.'),
+                backgroundColor: Colors.red,
+              ),
+            );
+            return; // Block order placement!
           }
         }
 
-        if (stock <= 0 || localItem.quantity > stock) {
+        bool priceChanged = false;
+        for (final p in remoteProducts) {
+          final String id = (p['id'] ?? '').toString();
+          final localItem = cart.items[id];
+          if (localItem == null) continue;
+
+          final bool isItemQuick = localItem.isOrderNow;
+          final double stock = ProductHelper.getStock(p, isOrderNow: isItemQuick);
+          final bool isAvailable = ProductHelper.isAvailable(p, isOrderNow: isItemQuick);
+
+          if (!isAvailable || stock <= 0) {
+            if (!mounted) return;
+            setState(() { _isPlacingOrder = false; });
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('${localItem.productName} is currently out of stock. Please remove it from cart.'),
+                backgroundColor: Colors.red,
+              ),
+            );
+            return; // Block order placement!
+          }
+
+          if (localItem.quantity > stock) {
+            if (!mounted) return;
+            setState(() { _isPlacingOrder = false; });
+            final formattedStock = (stock % 1 == 0) ? stock.toInt().toString() : stock.toStringAsFixed(2);
+            // Automatically readjust cart quantity to maximum available stock
+            ref.read(activeCartNotifierProvider).updateQuantity(localItem.productId, stock);
+            ScaffoldMessenger.of(context).hideCurrentSnackBar();
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Adjusted ${localItem.productName} quantity to maximum available stock ($formattedStock ${localItem.unit}). Please review your order before placing.'),
+                backgroundColor: const Color(0xFFD97706),
+                duration: const Duration(seconds: 4),
+              ),
+            );
+            return; // Block placement so customer reviews updated price/order
+          }
+
+          // Authoritative Price validation
+          double remotePrice;
+          if (isItemQuick) {
+            final rawQuick = p['order_now_selling_price'] ?? p['order_now_price'];
+            final double parsedQuick = _parsePrice(rawQuick);
+            remotePrice = parsedQuick > 0 ? parsedQuick : _parsePrice(p['price']);
+          } else {
+            final double parsedSelling = _parsePrice(p['selling_price']);
+            remotePrice = parsedSelling > 0 ? parsedSelling : _parsePrice(p['price']);
+          }
+
+          if ((localItem.price - remotePrice).abs() > 0.01) {
+            ref.read(activeCartNotifierProvider).updateItemPrice(id, remotePrice);
+            priceChanged = true;
+          }
+        }
+
+        if (priceChanged) {
           if (!mounted) return;
           setState(() { _isPlacingOrder = false; });
-          final formattedStock = (stock % 1 == 0) ? stock.toInt().toString() : stock.toStringAsFixed(2);
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(stock <= 0
-                  ? '${localItem.productName} is out of stock. Please remove it from cart.'
-                  : 'Insufficient stock for ${localItem.productName} (Available: $formattedStock ${localItem.unit}). Please adjust quantity.'),
-              backgroundColor: Colors.red,
+            const SnackBar(
+              content: Text('Some product prices have changed. Your cart has been updated. Please review before proceeding.'),
+              backgroundColor: Colors.orange,
+              duration: Duration(seconds: 4),
             ),
           );
-          return; // Block order placement!
-        }
-
-        // Price validation
-        final double remotePrice = localItem.isOrderNow
-            ? (((p['order_now_price'] as num?)?.toDouble() ?? 0.0) > 0
-                ? (p['order_now_price'] as num).toDouble()
-                : (p['price'] as num).toDouble())
-            : (p['price'] as num).toDouble();
-
-        if ((localItem.price - remotePrice).abs() > 0.01) {
-          ref.read(activeCartNotifierProvider).updateItemPrice(id, remotePrice);
-          priceChanged = true;
+          return; // Reject submission and let the user see the updated grand total!
         }
       }
-
-      if (priceChanged) {
-        if (!mounted) return;
-        setState(() { _isPlacingOrder = false; });
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Some product prices have changed. Your cart has been updated. Please review before proceeding.'),
-            backgroundColor: Colors.orange,
-            duration: Duration(seconds: 4),
-          ),
-        );
-        return; // Reject submission and let the user see the updated grand total!
-      }
-    } catch (e) {
-      debugPrint('Online stock/price check error: $e');
+    } catch (e, stackTrace) {
+      debugPrint('Online stock/price check warning: $e');
+      CrashObservabilityService.instance.logNonFatal(
+        e,
+        stackTrace: stackTrace,
+        reason: 'Checkout online stock/price pre-check non-blocking failure',
+      );
+      // Let authoritative placeOrder RPC validate stock & price transactionally on the server
     }
 
-    final name = customer['name'] ?? '';
-    final phone = customer['phone'] ?? '';
-    String address = (customer['address'] ?? '').toString().trim();
-
-    // Fallback: build address from area/road/sub_road fields if main address is empty
-    if (address.isEmpty) {
-      final parts = <String>[
-        (customer['sub_road_name'] ?? '').toString().trim(),
-        (customer['road_name'] ?? '').toString().trim(),
-        (customer['area_name'] ?? '').toString().trim(),
-      ].where((s) => s.isNotEmpty).toList();
-      address = parts.join(', ');
-    }
-
-    // If still empty after fallback, block the order
-    if (address.isEmpty) {
+    final name = (customer['name'] ?? '').toString().trim();
+    final phone = (customer['phone'] ?? '').toString().trim();
+    if (phone.isEmpty) {
       setState(() { _isPlacingOrder = false; });
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Delivery address is missing. Please update your address in Profile before placing an order.'),
+          content: Text('Contact phone number is missing. Please update your phone number in Profile before placing an order.'),
           backgroundColor: Colors.red,
           duration: Duration(seconds: 4),
         ),
       );
+      return;
+    }
+    final String areaId = (customer['area_id'] ?? '').toString().trim();
+    String address = (customer['address'] ?? '').toString().trim();
+
+    // Fallback: build address from area/road/sub_road fields if main address is empty or 'N/A'
+    if (address.isEmpty || address.toUpperCase() == 'N/A') {
+      final parts = <String>[
+        (customer['sub_road_name'] ?? '').toString().trim(),
+        (customer['road_name'] ?? '').toString().trim(),
+        (customer['area_name'] ?? '').toString().trim(),
+      ].where((s) => s.isNotEmpty && s.toUpperCase() != 'N/A').toList();
+      address = parts.join(', ');
+    }
+
+    // If still empty or no area selected, prompt user directly with the edit sheet in-place
+    if (address.isEmpty || address.toUpperCase() == 'N/A' || areaId.isEmpty) {
+      setState(() { _isPlacingOrder = false; });
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please select your delivery area and address to proceed.'),
+          backgroundColor: Color(0xFF1B3624),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      final saved = await DeliveryAddressEditSheet.show(
+        context,
+        initialCustomer: customer,
+      );
+      if (saved == true && mounted) {
+        _refreshSchedule();
+      }
       return;
     }
     final settings = ref.read(appSettingsProvider).valueOrNull;
@@ -238,8 +311,8 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
     String orderTakingDateStr;
     String deliveryDateStr;
 
-    if (isOrderNow) {
-      orderType = 'Quick Order';
+    if (isQuickOrder) {
+      orderType = 'Order Now';
       final now = AreaScheduleHelper.getKolkataTime();
       orderTakingDateStr = _formatDate(now);
       deliveryDateStr = _formatDate(now);
@@ -251,18 +324,12 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
       );
 
       if (details.state == ScheduleState.noSchedule) {
-        setState(() { _isPlacingOrder = false; });
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('No delivery schedule available for your area. Order cannot be placed.'),
-            backgroundColor: Colors.red,
-          ),
-        );
-        return;
-      }
-
-      if (details.state == ScheduleState.openToday) {
+        // Resilient fallback: allow ordering with next day delivery if area schedule is unconfigured
+        final now = AreaScheduleHelper.getKolkataTime();
+        orderType = 'Normal';
+        orderTakingDateStr = _formatDate(now);
+        deliveryDateStr = _formatDate(now.add(const Duration(days: 1)));
+      } else if (details.state == ScheduleState.openToday) {
         orderType = 'Normal';
         orderTakingDateStr = _formatDate(details.orderTakingDate!);
         deliveryDateStr = _formatDate(details.deliveryDate!);
@@ -279,27 +346,53 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
             name: name,
             phone: phone,
             address: address,
-            idempotencyKey: _idempotencyKey,
+            idempotencyKey: cart.idempotencyKey,
             deliveryDate: deliveryDateStr,
             orderType: orderType,
             orderTakingDate: orderTakingDateStr,
           );
 
       if (!mounted) return;
-      setState(() {
-        _isPlacingOrder = false;
-      });
 
       if (order != null) {
+        final bool isOfflineOrder = order['sync_status'] == 'pending' ||
+            order['is_offline'] == true ||
+            (order['order_number'] == null && order['offline_order_no'] != null);
+        final String orderNum = (order['order_number'] ?? order['offline_order_no'] ?? order['id'] ?? '').toString();
+
         // Trigger pleasant system chime notification for vocal order confirmation
         NotificationService.instance.showNotification(
-          id: (order['id'] as String).hashCode,
-          title: 'Order Placed! 🎉',
-          body: 'Your order ${order['order_number'] ?? 'OK-#'} has been successfully received.',
-          payload: order['id'] as String,
+          id: orderNum.hashCode,
+          title: isOfflineOrder ? 'Order Queued Offline 📱' : 'Order Placed! 🎉',
+          body: isOfflineOrder
+              ? 'Your order $orderNum is saved locally and will sync automatically when back online.'
+              : 'Your order $orderNum has been successfully received.',
+          payload: (order['id'] ?? '').toString(),
+          orderKey: orderNum,
         );
 
         ref.invalidate(orderListProvider);
+
+        if (isOfflineOrder) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Row(
+                children: [
+                  Icon(Icons.cloud_queue_rounded, color: Colors.white, size: 20),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Order Queued Offline — will sync automatically when online',
+                      style: TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ],
+              ),
+              backgroundColor: Color(0xFFD97706),
+              duration: Duration(seconds: 4),
+            ),
+          );
+        }
 
         // Push OrderConfirmationScreen for high-fidelity confirmation animation
         Navigator.pushReplacement(
@@ -311,7 +404,7 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
               cartItems: cart.items.values.toList(),
               subtotal: cart.subtotal,
               deliveryCharge: cart.deliveryCharge,
-              grandTotal: cart.grandTotal,
+              grandTotal: (order['total_amount'] as num?)?.toDouble() ?? cart.grandTotal,
             ),
             transitionsBuilder: (context, animation, secondaryAnimation, child) {
               return FadeTransition(opacity: animation, child: child);
@@ -319,6 +412,9 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
           ),
         );
       } else {
+        setState(() {
+          _isPlacingOrder = false;
+        });
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Failed to place order. Please check connectivity and try again.'),
@@ -359,8 +455,8 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
     final customer = ref.watch(authProvider).customer;
     final settings = ref.watch(appSettingsProvider).valueOrNull;
     final bool isClosed = isStoreClosed(settings);
-    final bool isOrderNow = cart.items.values.any((item) => item.isOrderNow);
     final allProducts = ref.watch(allProductsProvider).valueOrNull ?? [];
+    final bool isQuickOrder = cart.items.values.any((i) => i.isOrderNow);
 
     if (cart.items.isEmpty) {
       return AmbientBackground(
@@ -393,17 +489,19 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
 
 
     return AmbientBackground(
-      child: Scaffold(
-        backgroundColor: Colors.transparent,
-        appBar: AppBar(
+      child: PopScope(
+        canPop: !_isPlacingOrder,
+        child: Scaffold(
           backgroundColor: Colors.transparent,
-          elevation: 0,
-          scrolledUnderElevation: 0,
-          systemOverlayStyle: SystemUiOverlayStyle.dark,
-          leading: IconButton(
-            icon: const Icon(Icons.arrow_back_ios_new_rounded, color: textColorPrimary, size: 20),
-            onPressed: () => Navigator.pop(context),
-          ),
+          appBar: AppBar(
+            backgroundColor: Colors.transparent,
+            elevation: 0,
+            scrolledUnderElevation: 0,
+            systemOverlayStyle: SystemUiOverlayStyle.dark,
+            leading: IconButton(
+              icon: const Icon(Icons.arrow_back_ios_new_rounded, color: textColorPrimary, size: 20),
+              onPressed: _isPlacingOrder ? null : () => Navigator.pop(context),
+            ),
           title: Text(
             'Order Summary',
             style: GoogleFonts.outfit(
@@ -536,17 +634,66 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
                                           ],
                                         ),
                                         const SizedBox(height: 3),
-                                        Text(
-                                          customer['address']?.toString() ?? 'Default Delivery Address',
-                                          style: GoogleFonts.inter(
-                                            fontSize: 12.5,
-                                            color: textColorSecondary,
-                                            height: 1.25,
-                                          ),
-                                          maxLines: 2,
-                                          overflow: TextOverflow.ellipsis,
+                                        Builder(
+                                          builder: (context) {
+                                            String displayAddr = (customer['address']?.toString() ?? '').trim();
+                                            if (displayAddr.isEmpty || displayAddr.toUpperCase() == 'N/A') {
+                                              final parts = <String>[
+                                                (customer['sub_road_name'] ?? '').toString().trim(),
+                                                (customer['road_name'] ?? '').toString().trim(),
+                                                (customer['area_name'] ?? '').toString().trim(),
+                                              ].where((s) => s.isNotEmpty && s.toUpperCase() != 'N/A').toList();
+                                              displayAddr = parts.isNotEmpty ? parts.join(', ') : 'Default Delivery Address';
+                                            }
+                                            return Text(
+                                              displayAddr,
+                                              style: GoogleFonts.inter(
+                                                fontSize: 12.5,
+                                                color: textColorSecondary,
+                                                height: 1.25,
+                                              ),
+                                              maxLines: 2,
+                                              overflow: TextOverflow.ellipsis,
+                                            );
+                                          },
                                         ),
                                       ],
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  InkWell(
+                                    onTap: () async {
+                                      final saved = await DeliveryAddressEditSheet.show(
+                                        context,
+                                        initialCustomer: customer,
+                                      );
+                                      if (saved == true && mounted) {
+                                        _refreshSchedule();
+                                      }
+                                    },
+                                    borderRadius: BorderRadius.circular(8),
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFFECFDF5),
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(color: const Color(0xFFA7F3D0)),
+                                      ),
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          const Icon(Icons.edit_location_alt_outlined, size: 14, color: accentGreen),
+                                          const SizedBox(width: 4),
+                                          Text(
+                                            'Edit',
+                                            style: GoogleFonts.inter(
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.bold,
+                                              color: accentGreen,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
                                     ),
                                   ),
                                 ],
@@ -556,69 +703,7 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
                           ],
 
                           // ── 3. ELEGANT DELIVERY SCHEDULE CARD ────────────────────
-                          if (cart.items.values.any((item) => item.isOrderNow)) ...[
-                            Container(
-                              padding: const EdgeInsets.all(16),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFFFF7ED),
-                                borderRadius: BorderRadius.circular(20),
-                                border: Border.all(
-                                  color: const Color(0xFFFDBA74),
-                                  width: 1.2,
-                                ),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: const Color(0xFFEA580C).withValues(alpha: 0.05),
-                                    blurRadius: 14,
-                                    offset: const Offset(0, 4),
-                                  ),
-                                ],
-                              ),
-                              child: Row(
-                                children: [
-                                  Container(
-                                    width: 44,
-                                    height: 44,
-                                    decoration: const BoxDecoration(
-                                      color: Color(0xFFFFEDD5),
-                                      shape: BoxShape.circle,
-                                    ),
-                                    child: const Icon(
-                                      Icons.bolt_rounded,
-                                      color: Color(0xFFC2410C),
-                                      size: 24,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 14),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          '⚡ Quick Order (1-2 Hours Delivery)',
-                                          style: GoogleFonts.outfit(
-                                            fontSize: 15,
-                                            fontWeight: FontWeight.bold,
-                                            color: const Color(0xFF9A3412),
-                                          ),
-                                        ),
-                                        const SizedBox(height: 2),
-                                        Text(
-                                          'Estimated Delivery: Today, within 1 to 2 hours',
-                                          style: GoogleFonts.inter(
-                                            fontSize: 12.5,
-                                            fontWeight: FontWeight.w600,
-                                            color: const Color(0xFFC2410C),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(height: 20),
-                          ] else if (_scheduleDetails != null && _scheduleDetails!.state != ScheduleState.noSchedule) ...[
+                          if (_scheduleDetails != null && _scheduleDetails!.state != ScheduleState.noSchedule) ...[
                             Container(
                               padding: const EdgeInsets.all(16),
                               decoration: BoxDecoration(
@@ -782,26 +867,11 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
                                     final displayPrice = adjustedPrices[item.productId] ?? item.totalPrice;
 
                                     final matching = allProducts.firstWhere(
-                                      (p) => p['id']?.toString() == item.productId,
+                                      (p) => p['id']?.toString().trim().toLowerCase() == item.productId.trim().toLowerCase(),
                                       orElse: () => <String, dynamic>{},
                                     );
-                                    final double st = item.isOrderNow
-                                        ? ((matching['order_now_stock'] as num?)?.toDouble() ?? 0.0)
-                                        : ((matching['stock'] as num?)?.toDouble() ?? 0.0);
-                                    final bool isAvail = item.isOrderNow
-                                        ? ((matching['order_now_is_available'] == null ||
-                                                matching['order_now_is_available'] == true ||
-                                                matching['order_now_is_available'] == 1) &&
-                                            (matching['is_enabled'] == null ||
-                                                matching['is_enabled'] == true ||
-                                                matching['is_enabled'] == 1) &&
-                                            st > 0)
-                                        : ((matching['is_available'] == true || matching['is_available'] == 1) &&
-                                            (matching['is_enabled'] == null ||
-                                                matching['is_enabled'] == true ||
-                                                matching['is_enabled'] == 1) &&
-                                            st > 0);
-                                    final bool isItemStockOut = matching.isNotEmpty && !isAvail;
+                                     final bool isAvail = ProductHelper.isAvailable(matching, isOrderNow: item.isOrderNow);
+                                     final bool isItemStockOut = allProducts.isNotEmpty && matching.isNotEmpty && !isAvail;
 
                                     return Container(
                                       padding: isItemStockOut ? const EdgeInsets.all(8) : EdgeInsets.zero,
@@ -945,6 +1015,31 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
                                   ],
                                 ),
 
+                                // Round-off row when delivery is free but POS rounding applies
+                                if (cart.separateRoundingAdjustment > 0.001) ...[
+                                  const SizedBox(height: 8),
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Text(
+                                        'Round-off',
+                                        style: GoogleFonts.inter(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w500,
+                                          color: textColorSecondary,
+                                        ),
+                                      ),
+                                      Text(
+                                        '₹${_formatCurrency(cart.separateRoundingAdjustment)}',
+                                        style: GoogleFonts.outfit(
+                                          fontSize: 15,
+                                          fontWeight: FontWeight.w600,
+                                          color: textColorPrimary,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ],
                                 const SizedBox(height: 16),
                                 Container(
                                   height: 1,
@@ -1035,7 +1130,7 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
                             borderRadius: BorderRadius.circular(28),
                           ),
                         ),
-                        onPressed: _isPlacingOrder || isClosed || (!isOrderNow && (_scheduleDetails == null || _scheduleDetails!.state == ScheduleState.noSchedule))
+                        onPressed: _isPlacingOrder || isClosed || (!isQuickOrder && _scheduleDetails == null)
                             ? null
                             : () {
                                 HapticFeedback.mediumImpact();
@@ -1044,20 +1139,23 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            Text(
-                              _isPlacingOrder
-                                  ? 'PLACING ORDER...'
-                                  : isClosed
-                                      ? 'STORE CLOSED'
-                                      : isOrderNow
-                                          ? 'PLACE QUICK ORDER'
-                                          : _scheduleDetails?.state == ScheduleState.closedToday
-                                              ? 'CONFIRM PRE-ORDER'
-                                              : 'PLACE ORDER',
-                              style: GoogleFonts.outfit(
-                                fontSize: 16.5,
-                                fontWeight: FontWeight.bold,
-                                letterSpacing: 0.8,
+                            Flexible(
+                              child: Text(
+                                _isPlacingOrder
+                                    ? 'PLACING ORDER...'
+                                    : isClosed
+                                        ? 'STORE CLOSED'
+                                        : isQuickOrder
+                                            ? 'CONFIRM QUICK ORDER'
+                                            : _scheduleDetails?.state == ScheduleState.closedToday
+                                                ? 'CONFIRM PRE-ORDER'
+                                                : 'PLACE ORDER',
+                                style: GoogleFonts.outfit(
+                                  fontSize: 16.5,
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 0.8,
+                                ),
+                                overflow: TextOverflow.ellipsis,
                               ),
                             ),
                             const SizedBox(width: 10),
@@ -1081,7 +1179,8 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
                 ],
               ),
         ),
-      );
+      ),
+    );
   }
 
   String _formatCurrency(double amount) {

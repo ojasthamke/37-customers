@@ -46,3 +46,12 @@ app.*.map.json
 android/key.properties
 *.jks
 *.keystore
+
+# Build cache and internal agents
+.agents/
+android/app/.cxx/
+
+# Firebase & Cloud Secrets
+supabase/functions/firebase/
+*-firebase-adminsdk-*.json
+*.service-account.json

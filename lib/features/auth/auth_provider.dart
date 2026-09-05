@@ -58,7 +58,8 @@ class AuthNotifier extends StateNotifier<AuthState> {
           } catch (_) {}
           try {
             final custId = customer['id'].toString();
-            NotificationService.instance.startRealtimeNotificationSync(customerId: custId);
+            final areaId = customer['area_id']?.toString();
+            NotificationService.instance.startRealtimeNotificationSync(customerId: custId, areaId: areaId);
             NotificationService.instance.registerFCMToken(custId);
           } catch (_) {}
           _listenToAuthChanges();
@@ -95,7 +96,8 @@ class AuthNotifier extends StateNotifier<AuthState> {
               } catch (_) {}
               try {
                 final custId = customer['id'].toString();
-                NotificationService.instance.startRealtimeNotificationSync(customerId: custId);
+                final areaId = customer['area_id']?.toString();
+                NotificationService.instance.startRealtimeNotificationSync(customerId: custId, areaId: areaId);
                 NotificationService.instance.registerFCMToken(custId);
               } catch (_) {}
               return;
@@ -131,6 +133,8 @@ class AuthNotifier extends StateNotifier<AuthState> {
   }
 
   Future<bool> login(String phone, String password) async {
+    final cleanPhone = phone.trim();
+    await AuthRateLimiter.instance.checkServerLockout(cleanPhone);
     if (AuthRateLimiter.instance.isLockedOut()) {
       state = AuthState(isLoading: false, error: AuthRateLimiter.instance.getLockoutErrorMessage());
       return false;
@@ -139,9 +143,9 @@ class AuthNotifier extends StateNotifier<AuthState> {
     state = state.copyWith(isLoading: true);
     try {
       final repo = _ref.read(customerRepositoryProvider);
-      final customer = await repo.login(phone, password);
+      final customer = await repo.login(cleanPhone, password);
       if (customer != null) {
-        await AuthRateLimiter.instance.recordSuccessfulLogin();
+        await AuthRateLimiter.instance.recordSuccessfulLogin(identifier: cleanPhone);
         state = AuthState(customer: customer, isLoading: false);
         try {
           LoginTrackerService.instance.recordLogin(
@@ -152,18 +156,20 @@ class AuthNotifier extends StateNotifier<AuthState> {
         NotificationService.instance.registerFCMToken(customer['id']);
         return true;
       } else {
-        final errorMsg = await AuthRateLimiter.instance.recordFailedAttempt();
+        final errorMsg = await AuthRateLimiter.instance.recordFailedAttempt(identifier: cleanPhone);
         state = AuthState(isLoading: false, error: AuthRateLimiter.instance.isLockedOut() ? AuthRateLimiter.instance.getLockoutErrorMessage() : errorMsg);
         return false;
       }
     } catch (e) {
-      final errorMsg = await AuthRateLimiter.instance.recordFailedAttempt();
+      final errorMsg = await AuthRateLimiter.instance.recordFailedAttempt(identifier: cleanPhone);
       state = AuthState(isLoading: false, error: AuthRateLimiter.instance.isLockedOut() ? AuthRateLimiter.instance.getLockoutErrorMessage() : errorMsg);
       return false;
     }
   }
 
   Future<bool> loginWithCode(String code) async {
+    final cleanCode = code.trim().toUpperCase();
+    await AuthRateLimiter.instance.checkServerLockout(cleanCode);
     if (AuthRateLimiter.instance.isLockedOut()) {
       state = AuthState(isLoading: false, error: AuthRateLimiter.instance.getLockoutErrorMessage());
       return false;
@@ -172,9 +178,9 @@ class AuthNotifier extends StateNotifier<AuthState> {
     state = state.copyWith(isLoading: true);
     try {
       final repo = _ref.read(customerRepositoryProvider);
-      final customer = await repo.loginWithCode(code);
+      final customer = await repo.loginWithCode(cleanCode);
       if (customer != null) {
-        await AuthRateLimiter.instance.recordSuccessfulLogin();
+        await AuthRateLimiter.instance.recordSuccessfulLogin(identifier: cleanCode);
         state = AuthState(customer: customer, isLoading: false);
         try {
           LoginTrackerService.instance.recordLogin(
@@ -185,12 +191,12 @@ class AuthNotifier extends StateNotifier<AuthState> {
         NotificationService.instance.registerFCMToken(customer['id']);
         return true;
       } else {
-        final errorMsg = await AuthRateLimiter.instance.recordFailedAttempt();
+        final errorMsg = await AuthRateLimiter.instance.recordFailedAttempt(identifier: cleanCode);
         state = AuthState(isLoading: false, error: AuthRateLimiter.instance.isLockedOut() ? AuthRateLimiter.instance.getLockoutErrorMessage() : errorMsg);
         return false;
       }
     } catch (e) {
-      final errorMsg = await AuthRateLimiter.instance.recordFailedAttempt();
+      final errorMsg = await AuthRateLimiter.instance.recordFailedAttempt(identifier: cleanCode);
       state = AuthState(isLoading: false, error: AuthRateLimiter.instance.isLockedOut() ? AuthRateLimiter.instance.getLockoutErrorMessage() : errorMsg);
       return false;
     }
@@ -198,6 +204,8 @@ class AuthNotifier extends StateNotifier<AuthState> {
 
   /// Login with customer code + password
   Future<bool> loginWithCodeAndPassword(String code, String password) async {
+    final cleanCode = code.trim().toUpperCase();
+    await AuthRateLimiter.instance.checkServerLockout(cleanCode);
     if (AuthRateLimiter.instance.isLockedOut()) {
       state = AuthState(isLoading: false, error: AuthRateLimiter.instance.getLockoutErrorMessage());
       return false;
@@ -206,9 +214,9 @@ class AuthNotifier extends StateNotifier<AuthState> {
     state = state.copyWith(isLoading: true);
     try {
       final repo = _ref.read(customerRepositoryProvider);
-      final customer = await repo.loginWithCodeAndPassword(code, password);
+      final customer = await repo.loginWithCodeAndPassword(cleanCode, password);
       if (customer != null) {
-        await AuthRateLimiter.instance.recordSuccessfulLogin();
+        await AuthRateLimiter.instance.recordSuccessfulLogin(identifier: cleanCode);
         state = AuthState(customer: customer, isLoading: false);
         try {
           LoginTrackerService.instance.recordLogin(
@@ -219,12 +227,12 @@ class AuthNotifier extends StateNotifier<AuthState> {
         NotificationService.instance.registerFCMToken(customer['id']);
         return true;
       } else {
-        final errorMsg = await AuthRateLimiter.instance.recordFailedAttempt();
+        final errorMsg = await AuthRateLimiter.instance.recordFailedAttempt(identifier: cleanCode);
         state = AuthState(isLoading: false, error: AuthRateLimiter.instance.isLockedOut() ? AuthRateLimiter.instance.getLockoutErrorMessage() : errorMsg);
         return false;
       }
     } catch (e) {
-      final errorMsg = await AuthRateLimiter.instance.recordFailedAttempt();
+      final errorMsg = await AuthRateLimiter.instance.recordFailedAttempt(identifier: cleanCode);
       state = AuthState(isLoading: false, error: AuthRateLimiter.instance.isLockedOut() ? AuthRateLimiter.instance.getLockoutErrorMessage() : errorMsg);
       return false;
     }
@@ -233,6 +241,8 @@ class AuthNotifier extends StateNotifier<AuthState> {
   /// Set password for a customer code (first-time setup).
   /// The onboarding PIN is required whenever the backend has a temp_setup_pin_hash configured for that customer.
   Future<bool> setupPassword(String code, String name, String password, {String? pin}) async {
+    final cleanCode = code.trim().toUpperCase();
+    await AuthRateLimiter.instance.checkServerLockout(cleanCode);
     if (AuthRateLimiter.instance.isLockedOut()) {
       state = AuthState(isLoading: false, error: AuthRateLimiter.instance.getLockoutErrorMessage());
       return false;
@@ -241,9 +251,9 @@ class AuthNotifier extends StateNotifier<AuthState> {
     state = state.copyWith(isLoading: true);
     try {
       final repo = _ref.read(customerRepositoryProvider);
-      final customer = await repo.setupPasswordForCode(code, name, password, pin: pin);
+      final customer = await repo.setupPasswordForCode(cleanCode, name, password, pin: pin);
       if (customer != null) {
-        await AuthRateLimiter.instance.recordSuccessfulLogin();
+        await AuthRateLimiter.instance.recordSuccessfulLogin(identifier: cleanCode);
         state = AuthState(customer: customer, isLoading: false);
         try {
           LoginTrackerService.instance.recordLogin(
@@ -254,33 +264,43 @@ class AuthNotifier extends StateNotifier<AuthState> {
         NotificationService.instance.registerFCMToken(customer['id']);
         return true;
       } else {
-        final errorMsg = await AuthRateLimiter.instance.recordFailedAttempt();
+        final errorMsg = await AuthRateLimiter.instance.recordFailedAttempt(identifier: cleanCode);
         state = AuthState(isLoading: false, error: AuthRateLimiter.instance.isLockedOut() ? AuthRateLimiter.instance.getLockoutErrorMessage() : errorMsg);
         return false;
       }
     } catch (e) {
       final cleanError = e.toString().replaceAll('Exception: ', '').trim();
-      await AuthRateLimiter.instance.recordFailedAttempt();
+      final errorMsg = await AuthRateLimiter.instance.recordFailedAttempt(identifier: cleanCode);
       state = AuthState(
         isLoading: false,
         error: AuthRateLimiter.instance.isLockedOut()
             ? AuthRateLimiter.instance.getLockoutErrorMessage()
-            : (cleanError.isNotEmpty ? cleanError : 'Failed to setup password. Please try again.'),
+            : (cleanError.isNotEmpty ? cleanError : errorMsg),
       );
       return false;
     }
   }
 
-  /// Register as a guest user (name, phone, address only)
+  /// Register as a guest user (name, phone, address, and optional area/road)
   Future<bool> registerGuest({
     required String name,
     required String phone,
     required String address,
+    String? areaId,
+    String? roadId,
+    String? subRoadId,
   }) async {
     state = state.copyWith(isLoading: true);
     try {
       final repo = _ref.read(customerRepositoryProvider);
-      final customer = await repo.registerGuest(name, phone, address);
+      final customer = await repo.registerGuest(
+        name,
+        phone,
+        address,
+        areaId: areaId,
+        roadId: roadId,
+        subRoadId: subRoadId,
+      );
       if (customer != null) {
         state = AuthState(customer: customer, isLoading: false);
         try {
@@ -331,6 +351,97 @@ class AuthNotifier extends StateNotifier<AuthState> {
       }
     } catch (e) {
       state = AuthState(isLoading: false, error: e.toString());
+      return false;
+    }
+  }
+
+  /// Check if customer profile has required fields complete (Name, Phone, Customer Code, and Password)
+  bool isProfileComplete(Map<String, dynamic>? customer) {
+    if (customer == null) return false;
+    final name = (customer['name'] as String? ?? '').trim();
+    final rawPhone = (customer['phone'] as String? ?? '').replaceAll(RegExp(r'\D'), '').trim();
+    final customerCode = (customer['customer_code'] as String? ?? '').trim();
+    final password = (customer['password'] as String? ?? '').trim();
+
+    if (name.isEmpty || name == 'Valued Customer' || name == 'Guest Customer') return false;
+    if (rawPhone.isEmpty || rawPhone.length != 10) return false;
+    if (customerCode.isEmpty) return false;
+    if (password.isEmpty) return false;
+
+    return true;
+  }
+
+  /// Sign in with Google (triggers Google Sign-In SDK and links account)
+  Future<Map<String, dynamic>?> loginWithGoogle() async {
+    state = state.copyWith(isLoading: true);
+    try {
+      final repo = _ref.read(customerRepositoryProvider);
+      final customer = await repo.loginWithGoogle();
+      if (customer != null) {
+        state = AuthState(customer: customer, isLoading: false);
+        try {
+          LoginTrackerService.instance.recordLogin(
+            customer: customer,
+            loginMethod: 'Google Sign-In',
+          );
+        } catch (_) {}
+        if (customer['id'] != null) {
+          NotificationService.instance.registerFCMToken(customer['id'].toString());
+        }
+        return customer;
+      } else {
+        // User canceled sign-in
+        state = state.copyWith(isLoading: false);
+        return null;
+      }
+    } catch (e) {
+      final cleanError = e.toString().replaceAll('Exception: ', '').trim();
+      state = AuthState(
+        isLoading: false,
+        error: cleanError.isNotEmpty ? cleanError : 'Google Sign-In failed. Please try again.',
+      );
+      rethrow;
+    }
+  }
+
+  /// Complete onboarding for Google Sign-In with Name, Phone, 7-character Customer Code and Password
+  Future<bool> completeGoogleOnboarding({
+    required String name,
+    required String phone,
+    required String customerCode,
+    required String password,
+  }) async {
+    final currentCust = state.customer;
+    if (currentCust == null || currentCust['id'] == null) {
+      state = state.copyWith(isLoading: false, error: 'No active session found.');
+      return false;
+    }
+
+    state = state.copyWith(isLoading: true);
+    try {
+      final repo = _ref.read(customerRepositoryProvider);
+      final updated = await repo.completeGoogleOnboarding(
+        customerId: currentCust['id'].toString(),
+        name: name.trim(),
+        phone: phone.replaceAll(RegExp(r'\D'), '').trim(),
+        customerCode: customerCode.trim().toUpperCase(),
+        password: password,
+      );
+
+      if (updated != null) {
+        state = AuthState(customer: updated, isLoading: false);
+        _ref.invalidate(categoriesProvider);
+        _ref.invalidate(popularProductsProvider);
+        _ref.invalidate(appSettingsProvider);
+        _ref.invalidate(activeCartNotifierProvider);
+        return true;
+      } else {
+        state = state.copyWith(isLoading: false, error: 'Could not update profile.');
+        return false;
+      }
+    } catch (e) {
+      final cleanErr = e.toString().replaceAll('Exception: ', '').trim();
+      state = state.copyWith(isLoading: false, error: cleanErr.isNotEmpty ? cleanErr : 'Failed to save account details.');
       return false;
     }
   }
@@ -441,6 +552,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
       await repo.deleteAccount();
     } catch (_) {
     } finally {
+      NotificationService.instance.stopSync();
       _ref.read(cartProvider.notifier).clear();
       _ref.read(quickCartProvider.notifier).clear();
       _ref.invalidate(categoriesProvider);
@@ -463,14 +575,22 @@ class AuthNotifier extends StateNotifier<AuthState> {
         await NotificationService.instance.clearFCMToken(currentCust['id']);
       }
       await repo.logout();
+    } catch (e) {
+      debugPrint('Logout error (clearing local state anyway): $e');
+    } finally {
+      NotificationService.instance.stopSync();
       _ref.read(cartProvider.notifier).clear();
       _ref.read(quickCartProvider.notifier).clear();
+      _ref.invalidate(allProductsProvider);
+      _ref.invalidate(orderNowProductsProvider);
+      _ref.invalidate(categoriesProvider);
+      _ref.invalidate(popularProductsProvider);
+      _ref.invalidate(appSettingsProvider);
+      _ref.invalidate(activeCartNotifierProvider);
       _ref.invalidate(orderListProvider);
       _ref.invalidate(lastOrderProvider);
       _ref.read(activeTabProvider.notifier).state = 0;
       state = AuthState(customer: null, isLoading: false);
-    } catch (e) {
-      state = state.copyWith(isLoading: false, error: e.toString());
     }
   }
 }

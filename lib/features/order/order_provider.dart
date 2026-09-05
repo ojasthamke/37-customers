@@ -2,18 +2,20 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' hide AuthState;
+import 'package:sqflite/sqflite.dart';
 import '../../core/database/database_helper.dart';
 import '../../core/database/providers.dart';
 import '../auth/auth_provider.dart';
-import '../../core/services/notification_service.dart';
 import '../cart/cart_provider.dart';
+import '../../core/services/sync_service.dart';
 
 class OrderListNotifier extends StateNotifier<AsyncValue<List<Map<String, dynamic>>>> {
   final Ref _ref;
   StreamSubscription? _subscription;
   Timer? _pollTimer;
   final Map<String, String> _lastKnownStatuses = {};
-
+  bool _isFetchingSilent = false;
+  int _fetchOrderRequestId = 0;
 
   OrderListNotifier(this._ref) : super(const AsyncValue.loading()) {
     // Listen for auth state changes to subscribe to customer orders
@@ -22,7 +24,7 @@ class OrderListNotifier extends StateNotifier<AsyncValue<List<Map<String, dynami
         _subscribeToOrders(next.customer!['id'] ?? '');
       } else {
         _unsubscribe();
-        state = const AsyncValue.data([]);
+        if (mounted) state = const AsyncValue.data([]);
       }
     });
 
@@ -52,31 +54,20 @@ class OrderListNotifier extends StateNotifier<AsyncValue<List<Map<String, dynami
           .from('orders')
           .stream(primaryKey: ['id'])
           .map((list) {
-            final filtered = list.where((o) => o['customer_id'] == customerId || o['customer_phone'] == phone).toList();
-            return _deduplicateOrders(filtered);
+            final filtered = list.where((o) => 
+              (customerId.isNotEmpty && o['customer_id'] == customerId) || 
+              (phone.isNotEmpty && o['customer_phone'] == phone)
+            ).toList();
+            return deduplicateOrders(filtered);
           })
           .listen((list) async {
-            final bool isFirstLoad = _lastKnownStatuses.isEmpty;
             for (final order in list) {
-              final String id = order['id'] as String;
-              final String orderNo = order['order_number'] ?? 'N/A';
+              final String id = (order['id'] ?? '').toString();
               final String status = order['status'] ?? 'Pending';
-              
-              if (!isFirstLoad) {
-                final oldStatus = _lastKnownStatuses[id];
-                if (oldStatus != null && oldStatus != status) {
-                  NotificationService.instance.showNotification(
-                    id: id.hashCode,
-                    title: 'Order Status Updated',
-                    body: 'Your order $orderNo has been updated to: $status',
-                    payload: id,
-                  );
-                }
-              }
               _lastKnownStatuses[id] = status;
             }
 
-            // Also silently fetch full order_items on realtime order change
+            // Silently fetch full order_items on realtime order change for in-app UI
             _fetchSilent(customerId, phone);
           }, onError: (err) {
             debugPrint('Realtime orders error (ignored): $err');
@@ -87,53 +78,82 @@ class OrderListNotifier extends StateNotifier<AsyncValue<List<Map<String, dynami
   }
 
   Future<void> _fetchSilent(String customerId, String phone, {bool isInitial = false}) async {
+    if (_isFetchingSilent && !isInitial) return;
+    _isFetchingSilent = true;
+    final int requestId = ++_fetchOrderRequestId;
+
     try {
+      if (customerId.isEmpty && phone.isEmpty) {
+        if (mounted) state = const AsyncValue.data([]);
+        return;
+      }
+
       final client = Supabase.instance.client;
-      final list = await client
-          .from('orders')
-          .select('*, order_items(*)')
-          .or('customer_id.eq.$customerId,customer_phone.eq.$phone')
-          .order('order_date', ascending: false);
+      var query = client.from('orders').select('*, order_items(*)');
+      if (customerId.isNotEmpty && phone.isNotEmpty) {
+        query = query.or('customer_id.eq.$customerId,customer_phone.eq.$phone');
+      } else if (customerId.isNotEmpty) {
+        query = query.eq('customer_id', customerId);
+      } else {
+        query = query.eq('customer_phone', phone);
+      }
+
+      final list = await query.order('order_date', ascending: false).timeout(const Duration(seconds: 15));
+      if (requestId != _fetchOrderRequestId) return;
 
       final parsed = List<Map<String, dynamic>>.from(list);
-      final deduped = _deduplicateOrders(parsed);
-      state = AsyncValue.data(deduped);
+      final deduped = deduplicateOrders(parsed);
+      if (mounted) {
+        state = AsyncValue.data(deduped);
+      }
 
       // Clean up SQLite local orders cache to purge any stale OFF- duplicates
       try {
         final db = await DatabaseHelper.instance.database;
-        for (final order in deduped) {
-          final offlineNo = order['offline_order_no']?.toString();
-          final orderNo = order['order_number']?.toString();
-          final orderId = order['id']?.toString();
-          if (offlineNo != null && offlineNo.isNotEmpty) {
-            await db.delete('orders', where: "offline_order_no = ? AND (order_number IS NULL OR order_number = '' OR sync_status != 'synced')", whereArgs: [offlineNo]);
+        await db.transaction((txn) async {
+          for (final order in deduped) {
+            final offlineNo = order['offline_order_no']?.toString();
+            final orderNo = order['order_number']?.toString();
+            final orderId = order['id']?.toString();
+            if (offlineNo != null && offlineNo.isNotEmpty) {
+              await txn.delete('orders', where: "offline_order_no = ? AND (order_number IS NULL OR order_number = '' OR sync_status != 'synced')", whereArgs: [offlineNo]);
+            }
+            if (orderNo != null && orderNo.isNotEmpty) {
+              await txn.delete('orders', where: "order_number = ? AND sync_status != 'synced'", whereArgs: [orderNo]);
+            }
+            if (orderId != null && orderId.isNotEmpty) {
+              await txn.delete('orders', where: "id = ? AND sync_status != 'synced'", whereArgs: [orderId]);
+            }
           }
-          if (orderNo != null && orderNo.isNotEmpty) {
-            await db.delete('orders', where: "order_number = ? AND sync_status != 'synced'", whereArgs: [orderNo]);
-          }
-          if (orderId != null && orderId.isNotEmpty) {
-            await db.delete('orders', where: "id = ? AND sync_status != 'synced'", whereArgs: [orderId]);
-          }
-        }
+        });
       } catch (e) {
         debugPrint('OrderListNotifier: SQLite cleanup error: $e');
       }
     } catch (err, stack) {
-      if (isInitial) {
+      if (requestId != _fetchOrderRequestId) return;
+      if (isInitial && mounted) {
         try {
           final repo = _ref.read(orderRepositoryProvider);
           final list = await repo.getOrders(phone);
-          final filtered = list.where((o) => o['customer_id'] == customerId || o['customer_phone'] == phone).toList();
-          state = AsyncValue.data(_deduplicateOrders(filtered));
+          final filtered = list.where((o) => 
+            (customerId.isNotEmpty && o['customer_id'] == customerId) || 
+            (phone.isNotEmpty && o['customer_phone'] == phone)
+          ).toList();
+          if (mounted) {
+            state = AsyncValue.data(deduplicateOrders(filtered));
+          }
         } catch (e) {
-          state = AsyncValue.error(err, stack);
+          if (mounted) {
+            state = AsyncValue.error(err, stack);
+          }
         }
       }
+    } finally {
+      _isFetchingSilent = false;
     }
   }
 
-  List<Map<String, dynamic>> _deduplicateOrders(List<Map<String, dynamic>> orders) {
+  List<Map<String, dynamic>> deduplicateOrders(List<Map<String, dynamic>> orders) {
     final Map<String, Map<String, dynamic>> dedupMap = {};
     for (final o in orders) {
       final String orderNumber = o['order_number']?.toString().trim() ?? '';
@@ -243,6 +263,7 @@ class OrderListNotifier extends StateNotifier<AsyncValue<List<Map<String, dynami
       final areaName = customer?['area_name'];
       final roadName = customer?['road_name'];
       final subRoadName = customer?['sub_road_name'];
+      final customerId = customer?['id']?.toString();
 
       final order = await repo.placeOrder(
         customerPhone: phone,
@@ -257,6 +278,7 @@ class OrderListNotifier extends StateNotifier<AsyncValue<List<Map<String, dynami
         subRoadName: subRoadName,
         orderType: orderType,
         orderTakingDate: orderTakingDate,
+        customerId: customerId,
       );
 
       _ref.read(activeCartNotifierProvider).clear();
@@ -265,6 +287,27 @@ class OrderListNotifier extends StateNotifier<AsyncValue<List<Map<String, dynami
     } catch (e) {
       debugPrint('OrderListNotifier: placeOrder error: $e');
       rethrow;
+    }
+  }
+
+  Future<void> retryOrderSync(String orderId) async {
+    final repo = _ref.read(orderRepositoryProvider);
+    await repo.retryOrderSync(orderId);
+    await SyncService.instance.syncPendingOrders();
+    final customer = _ref.read(authProvider).customer;
+    final phone = customer?['phone']?.toString() ?? '';
+    if (phone.isNotEmpty) {
+      await fetchOrders(phone);
+    }
+  }
+
+  Future<void> dismissFailedOrder(String orderId) async {
+    final repo = _ref.read(orderRepositoryProvider);
+    await repo.dismissPermanentlyFailedOrder(orderId);
+    final customer = _ref.read(authProvider).customer;
+    final phone = customer?['phone']?.toString() ?? '';
+    if (phone.isNotEmpty) {
+      await fetchOrders(phone);
     }
   }
 }
@@ -281,35 +324,179 @@ class OrderFullDetails {
 }
 
 // Order details provider family (Realtime Stream with Future fallback & Polling)
-final orderDetailsProvider = StreamProvider.family<OrderFullDetails, String>((ref, orderId) {
+final orderDetailsProvider = StreamProvider.autoDispose.family<OrderFullDetails, String>((ref, orderId) {
   final client = Supabase.instance.client;
+  final dbHelper = DatabaseHelper.instance;
   final controller = StreamController<OrderFullDetails>();
   Timer? pollTimer;
+  bool hasEmittedData = false;
+  int currentSeq = 0;
+  int latestCommittedSeq = 0;
+
+  bool phoneMatch(String a, String b) {
+    if (a == b) return true;
+    final cleanA = a.replaceAll(RegExp(r'\D'), '');
+    final cleanB = b.replaceAll(RegExp(r'\D'), '');
+    if (cleanA.isEmpty || cleanB.isEmpty) return false;
+    if (cleanA == cleanB) return true;
+    if (cleanA.length >= 10 && cleanB.length >= 10) {
+      return cleanA.substring(cleanA.length - 10) == cleanB.substring(cleanB.length - 10);
+    }
+    return false;
+  }
+
+  Future<void> loadLocalFirst() async {
+    try {
+      final currentCust = ref.read(authProvider).customer;
+      if (currentCust == null) return;
+      final currentCustId = currentCust['id']?.toString() ?? '';
+      final currentPhone = currentCust['phone']?.toString() ?? '';
+
+      final db = await dbHelper.database;
+      final localOrders = await db.query(
+        'orders',
+        where: 'id = ? OR order_number = ? OR offline_order_no = ? OR idempotency_key = ?',
+        whereArgs: [orderId, orderId, orderId, orderId],
+      );
+      if (localOrders.isNotEmpty) {
+        final orderMap = Map<String, dynamic>.from(localOrders.first);
+        final orderCustId = orderMap['customer_id']?.toString() ?? '';
+        final orderPhone = orderMap['customer_phone']?.toString() ?? '';
+
+        final bool idMatches = currentCustId.isNotEmpty && orderCustId.isNotEmpty && orderCustId == currentCustId;
+        final bool phoneMatches = currentPhone.isNotEmpty && orderPhone.isNotEmpty && phoneMatch(currentPhone, orderPhone);
+        final bool isUnknownOwnership = orderCustId.isEmpty && orderPhone.isEmpty;
+        if (!idMatches && !phoneMatches && !isUnknownOwnership) {
+          debugPrint('[OrderDetails] Suppressing local order load: ownership mismatch with current user');
+          return;
+        }
+
+        final actualId = orderMap['id']?.toString() ?? orderId;
+        final localItems = await db.query('order_items', where: 'order_id = ?', whereArgs: [actualId]);
+        if (!controller.isClosed) {
+          hasEmittedData = true;
+          controller.add(OrderFullDetails(
+            order: orderMap,
+            items: List<Map<String, dynamic>>.from(localItems),
+          ));
+        }
+      }
+    } catch (_) {}
+  }
 
   Future<void> fetchLatest() async {
+    final int mySeq = ++currentSeq;
     try {
-      var order = await client.from('orders').select().eq('id', orderId).maybeSingle();
-      order ??= await client.from('orders').select().eq('idempotency_key', orderId).maybeSingle();
+      final currentCust = ref.read(authProvider).customer;
+      if (currentCust == null) {
+        if (!controller.isClosed) {
+          controller.addError(Exception('Unauthorized: Please log in to view order details.'));
+        }
+        return;
+      }
+      final currentCustId = currentCust['id']?.toString() ?? '';
+      final currentPhone = currentCust['phone']?.toString() ?? '';
+
+      final order = await client
+          .from('orders')
+          .select()
+          .or('id.eq.$orderId,order_number.eq.$orderId,offline_order_no.eq.$orderId,idempotency_key.eq.$orderId')
+          .maybeSingle()
+          .timeout(const Duration(seconds: 15));
       
       if (order != null) {
-        final itemsRes = await client.from('order_items').select().eq('order_id', order['id']);
+        final orderCustId = order['customer_id']?.toString() ?? '';
+        final orderPhone = order['customer_phone']?.toString() ?? '';
+        final bool idMatches = currentCustId.isNotEmpty && orderCustId.isNotEmpty && orderCustId == currentCustId;
+        final bool phoneMatches = currentPhone.isNotEmpty && orderPhone.isNotEmpty && phoneMatch(currentPhone, orderPhone);
+        if (!idMatches && !phoneMatches) {
+          if (!controller.isClosed) {
+            controller.addError(Exception('Unauthorized order access.'));
+          }
+          return;
+        }
+        final itemsRes = await client.from('order_items').select().eq('order_id', order['id']).timeout(const Duration(seconds: 15));
         final items = List<Map<String, dynamic>>.from(itemsRes);
+        
+        try {
+          final db = await dbHelper.database;
+          await db.insert(
+            'orders',
+            {
+              'id': order['id']?.toString(),
+              'order_number': order['order_number']?.toString(),
+              'customer_id': order['customer_id']?.toString(),
+              'customer_phone': order['customer_phone']?.toString(),
+              'delivery_address': order['delivery_address']?.toString(),
+              'order_date': order['order_date']?.toString(),
+              'status': order['status']?.toString() ?? 'Pending',
+              'total_amount': (order['total_amount'] as num?)?.toDouble() ?? 0.0,
+              'sync_status': 'synced',
+              'delivery_date': order['delivery_date']?.toString(),
+              'order_type': order['order_type']?.toString() ?? 'Normal',
+              'order_taking_date': order['order_taking_date']?.toString(),
+              'offline_order_no': order['offline_order_no']?.toString(),
+              'customer_name': order['customer_name']?.toString(),
+            },
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+        } catch (_) {}
+
+        if (mySeq < latestCommittedSeq) return;
+        latestCommittedSeq = mySeq;
+
         if (!controller.isClosed) {
+          hasEmittedData = true;
           controller.add(OrderFullDetails(order: Map<String, dynamic>.from(order), items: items));
         }
       } else {
-        if (!controller.isClosed) {
-          controller.addError(Exception('Order has been removed or deleted.'));
+        // If not on remote, check if we had local
+        final db = await dbHelper.database;
+        final localOrders = await db.query(
+          'orders',
+          where: 'id = ? OR order_number = ? OR offline_order_no = ? OR idempotency_key = ?',
+          whereArgs: [orderId, orderId, orderId, orderId],
+        );
+        if (localOrders.isEmpty && !controller.isClosed) {
+          controller.addError(Exception('Order not found.'));
         }
       }
     } catch (e) {
-      if (!controller.isClosed) {
+      // Offline / network failure fallback: check local DB once more before emitting error
+      if (!hasEmittedData) {
+        try {
+          final db = await dbHelper.database;
+          final localOrders = await db.query(
+            'orders',
+            where: 'id = ? OR order_number = ? OR offline_order_no = ? OR idempotency_key = ?',
+            whereArgs: [orderId, orderId, orderId, orderId],
+          );
+          if (localOrders.isNotEmpty) {
+            final orderMap = Map<String, dynamic>.from(localOrders.first);
+            final actualId = orderMap['id']?.toString() ?? orderId;
+            final localItems = await db.query('order_items', where: 'order_id = ?', whereArgs: [actualId]);
+            if (!controller.isClosed) {
+              hasEmittedData = true;
+              controller.add(OrderFullDetails(
+                order: orderMap,
+                items: List<Map<String, dynamic>>.from(localItems),
+              ));
+              return;
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Only emit error if no cached/local data is already displayed
+      if (!controller.isClosed && !hasEmittedData) {
         controller.addError(e);
+      } else {
+        debugPrint('orderDetailsProvider: Remote fetch error (preserving cached data): $e');
       }
     }
   }
 
-  fetchLatest();
+  loadLocalFirst().then((_) => fetchLatest());
 
   // Polling fallback every 10 seconds
   pollTimer = Timer.periodic(const Duration(seconds: 10), (_) => fetchLatest());
@@ -320,15 +507,34 @@ final orderDetailsProvider = StreamProvider.family<OrderFullDetails, String>((re
         .from('orders')
         .stream(primaryKey: ['id'])
         .map((list) {
-          final matched = list.where((o) => o['id'] == orderId || o['idempotency_key'] == orderId).toList();
+          final matched = list.where((o) =>
+              o['id'] == orderId ||
+              o['order_number'] == orderId ||
+              o['offline_order_no'] == orderId ||
+              o['idempotency_key'] == orderId).toList();
           return matched.isNotEmpty ? matched.first : null;
         });
 
     sub = orderStream.listen((order) async {
+      final int rtSeq = ++currentSeq;
       if (order != null) {
+        final currentCust = ref.read(authProvider).customer;
+        if (currentCust == null) return;
+        final currentCustId = currentCust['id']?.toString() ?? '';
+        final currentPhone = currentCust['phone']?.toString() ?? '';
+        final orderCustId = order['customer_id']?.toString() ?? '';
+        final orderPhone = order['customer_phone']?.toString() ?? '';
+        final bool idMatches = currentCustId.isNotEmpty && orderCustId.isNotEmpty && orderCustId == currentCustId;
+        final bool phoneMatches = currentPhone.isNotEmpty && orderPhone.isNotEmpty && orderPhone == currentPhone;
+        if (!idMatches && !phoneMatches) {
+          return;
+        }
+
         try {
           final itemsRes = await client.from('order_items').select().eq('order_id', order['id']);
           final items = List<Map<String, dynamic>>.from(itemsRes);
+          if (rtSeq < latestCommittedSeq) return;
+          latestCommittedSeq = rtSeq;
           if (!controller.isClosed) {
             controller.add(OrderFullDetails(order: Map<String, dynamic>.from(order), items: items));
           }

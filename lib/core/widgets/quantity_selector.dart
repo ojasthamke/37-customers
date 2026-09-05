@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../features/cart/cart_provider.dart';
+import '../utils/product_helper.dart';
 
 class QuantityOption {
   final String label;
@@ -31,18 +32,20 @@ class _QuantitySelectionSheetState extends ConsumerState<QuantitySelectionSheet>
   final customController = TextEditingController();
   bool initialized = false;
 
-  @override
-  void initState() {
-    super.initState();
+  void _setupOptions() {
     unit = (widget.product['unit'] ?? 'kg').toString().toLowerCase();
-    price = (widget.product['price'] is num)
-        ? (widget.product['price'] as num).toDouble()
-        : (double.tryParse(widget.product['price']?.toString() ?? '') ?? 0.0);
+    final bool isQuick = widget.product['is_order_now'] == true;
+    final dynamic rawPrice = isQuick ? (widget.product['order_now_price'] ?? widget.product['price']) : widget.product['price'];
+    price = (rawPrice is num)
+        ? rawPrice.toDouble()
+        : (double.tryParse(rawPrice?.toString() ?? '') ?? 0.0);
     productId = widget.product['id']?.toString() ?? '';
 
-    final double stock = widget.product['is_order_now'] == true
-        ? ((widget.product['order_now_stock'] as num?)?.toDouble() ?? (widget.product['stock'] as num?)?.toDouble() ?? 0.0)
-        : ((widget.product['stock'] as num?)?.toDouble() ?? (double.tryParse(widget.product['stock']?.toString() ?? '') ?? 0.0));
+    final rawStock = isQuick ? widget.product['order_now_stock'] : widget.product['stock'];
+    final double? rawStockNum = (rawStock is num)
+        ? rawStock.toDouble()
+        : double.tryParse(rawStock?.toString() ?? '');
+    final double stock = rawStockNum ?? 0.0;
 
     if (unit == 'kg' || unit == 'g' || unit == 'gram' || unit == 'grams') {
       if (unit == 'kg') {
@@ -80,8 +83,25 @@ class _QuantitySelectionSheetState extends ConsumerState<QuantitySelectionSheet>
       ];
     }
 
-    // Filter preset options based on available stock
-    options = options.where((opt) => opt.value <= stock).toList();
+    // Filter preset options based on available stock (if tracked)
+    if (rawStockNum != null) {
+      options = options.where((opt) => opt.value <= stock).toList();
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _setupOptions();
+  }
+
+  @override
+  void didUpdateWidget(QuantitySelectionSheet oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.product != widget.product) {
+      _setupOptions();
+      if (mounted) setState(() {});
+    }
   }
 
   @override
@@ -90,13 +110,28 @@ class _QuantitySelectionSheetState extends ConsumerState<QuantitySelectionSheet>
     super.dispose();
   }
 
+  double? get stock {
+    final bool isQuick = widget.product['is_order_now'] == true;
+    final raw = isQuick ? widget.product['order_now_stock'] : widget.product['stock'];
+    final double? numVal = (raw is num) ? raw.toDouble() : double.tryParse(raw?.toString() ?? '');
+    return numVal;
+  }
+
   double getCalculatedQty() {
     if (isCustom) {
-      final input = double.tryParse(customController.text) ?? 0.0;
-      if (unit == 'kg' && input >= 10.0) {
-        return input / 1000.0; // convert grams to kg
+      final clean = customController.text.trim().toLowerCase().replaceAll(',', '.');
+      if (clean.endsWith('kg')) {
+        return double.tryParse(clean.replaceAll('kg', '').trim()) ?? 0.0;
       }
-      return input;
+      if (clean.endsWith('g') || clean.endsWith('gm') || clean.endsWith('gram') || clean.endsWith('grams')) {
+        final g = double.tryParse(clean.replaceAll(RegExp(r'[a-z]'), '').trim()) ?? 0.0;
+        return ((g / 1000.0) * 1000).round() / 1000.0;
+      }
+      final input = double.tryParse(clean) ?? 0.0;
+      if (unit == 'kg' && input >= 50.0) {
+        return ((input / 1000.0) * 1000).round() / 1000.0; // convert grams to kg
+      }
+      return ((input) * 1000).round() / 1000.0;
     }
     return selectedValue ?? 0.0;
   }
@@ -106,39 +141,48 @@ class _QuantitySelectionSheetState extends ConsumerState<QuantitySelectionSheet>
   }
 
   String? get _validationError {
-    final double stock = widget.product['is_order_now'] == true
-        ? ((widget.product['order_now_stock'] as num?)?.toDouble() ?? (widget.product['stock'] as num?)?.toDouble() ?? 0.0)
-        : ((widget.product['stock'] as num?)?.toDouble() ?? 0.0);
+    final bool isQuick = widget.product['is_order_now'] == true;
+    final double stockNum = ProductHelper.getStock(widget.product, isOrderNow: isQuick);
+    final bool isAvail = ProductHelper.isAvailable(widget.product, isOrderNow: isQuick);
+
+    if (!isAvail || stockNum <= 0) {
+      return 'Item is currently out of stock';
+    }
+
     if (!isCustom) {
-      if (selectedValue != null && selectedValue! > stock) {
-        return 'Only $stock $unit available in stock';
+      if (selectedValue != null && selectedValue! > stockNum) {
+        return 'Only ${formatQuantity(stockNum, unit)} available in stock';
       }
       return null;
     }
     final text = customController.text.trim();
     if (text.isEmpty) return 'Quantity is required';
-    final val = double.tryParse(text);
-    if (val == null) return 'Please enter a valid number';
-    if (val <= 0) return 'Quantity must be greater than zero';
+    final qty = getCalculatedQty();
+    if (qty <= 0) return 'Quantity must be greater than zero';
     
-    double checkQty = val;
-    if (unit == 'kg' && val >= 10.0) {
-      checkQty = val / 1000.0;
-    }
-    
-    if (checkQty > stock) {
-      return 'Only $stock $unit available in stock';
+    if (qty > stockNum) {
+      return 'Exceeds stock. Only ${formatQuantity(stockNum, unit)} available.';
     }
     return null;
   }
 
   String? get _helperText {
     if (!isCustom) return null;
-    final text = customController.text.trim();
+    final text = customController.text.trim().toLowerCase().replaceAll(',', '.');
     if (text.isEmpty) return null;
+    if (text.endsWith('kg')) {
+      final numPart = double.tryParse(text.replaceAll('kg', '').trim());
+      if (numPart != null && numPart > 0) return 'Calculated: $numPart kg';
+    }
+    if (text.endsWith('g') || text.endsWith('gm') || text.endsWith('gram') || text.endsWith('grams')) {
+      final numPart = double.tryParse(text.replaceAll(RegExp(r'[a-z]'), '').trim());
+      if (numPart != null && numPart > 0) {
+        return 'Calculated: ${(numPart / 1000.0).toStringAsFixed(3)} kg (${numPart.toInt()} g)';
+      }
+    }
     final val = double.tryParse(text);
     if (val != null && val > 0) {
-      if (unit == 'kg' && val >= 10.0) {
+      if (unit == 'kg' && val >= 50.0) {
         return 'Calculated: ${(val / 1000.0).toStringAsFixed(3)} kg (${val.toInt()} g)';
       }
     }
@@ -183,31 +227,34 @@ class _QuantitySelectionSheetState extends ConsumerState<QuantitySelectionSheet>
     const Color bgCard = Color(0xFFF3ECE6);
     const Color borderPillColor = Color(0xFFE2D6CA);
 
-    return SingleChildScrollView(
-      child: Padding(
-        padding: EdgeInsets.only(
-          bottom: MediaQuery.of(context).viewInsets.bottom + 24,
-          left: 24,
-          right: 24,
-          top: 24,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Expanded(
-                  child: Text(
-                    widget.product['name'] ?? '',
-                    style: GoogleFonts.outfit(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 20,
-                      color: textColorPrimary,
+    return SafeArea(
+      top: false,
+      bottom: true,
+      child: SingleChildScrollView(
+        child: Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(context).viewInsets.bottom + MediaQuery.of(context).viewPadding.bottom + 20,
+            left: 24,
+            right: 24,
+            top: 24,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Expanded(
+                    child: Text(
+                      widget.product['name'] ?? '',
+                      style: GoogleFonts.outfit(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 20,
+                        color: textColorPrimary,
+                      ),
                     ),
                   ),
-                ),
                 IconButton(
                   icon: const Icon(Icons.close_rounded, color: textColorPrimary),
                   tooltip: 'Close',
@@ -216,8 +263,33 @@ class _QuantitySelectionSheetState extends ConsumerState<QuantitySelectionSheet>
               ],
             ),
             Text(
-              'Unit Price: ₹${price.toStringAsFixed(0)} per $unit',
+              'Unit Price: ₹${_formatCurrency(price)} per $unit',
               style: GoogleFonts.inter(color: textColorSecondary, fontSize: 14),
+            ),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Icon(
+                  (stock == null || stock! > 0) ? Icons.inventory_2_outlined : Icons.warning_amber_rounded,
+                  size: 14,
+                  color: (stock == null || stock! > 0) ? const Color(0xFF166534) : const Color(0xFF991B1B),
+                ),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(
+                    stock != null
+                        ? (stock! > 0 ? 'Available in Stock: ${formatQuantity(stock!, unit)}' : 'Out of Stock')
+                        : 'In Stock',
+                    style: GoogleFonts.inter(
+                      color: (stock == null || stock! > 0) ? const Color(0xFF166534) : const Color(0xFF991B1B),
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 20),
             Text(
@@ -294,6 +366,41 @@ class _QuantitySelectionSheetState extends ConsumerState<QuantitySelectionSheet>
             
             if (isCustom) ...[
               const SizedBox(height: 16),
+              if (stock != null && stock! > 0)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8.0),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          'Custom quantity ($unit):',
+                          style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: textColorPrimary),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      GestureDetector(
+                        onTap: () {
+                          HapticFeedback.selectionClick();
+                          setState(() {
+                            final formatted = (stock! % 1 == 0) ? stock!.toInt().toString() : stock!.toStringAsFixed(2);
+                            customController.text = (unit == 'kg' && stock! >= 50.0) ? '$formatted kg' : formatted;
+                          });
+                        },
+                        child: Text(
+                          'Set to Max (${formatQuantity(stock!, unit)})',
+                          style: GoogleFonts.inter(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: const Color(0xFF166534),
+                            decoration: TextDecoration.underline,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               TextField(
                 controller: customController,
                 keyboardType: const TextInputType.numberWithOptions(decimal: true),
@@ -340,7 +447,7 @@ class _QuantitySelectionSheetState extends ConsumerState<QuantitySelectionSheet>
                   style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.w500, color: textColorPrimary),
                 ),
                 Text(
-                  '₹${getCalculatedPrice().toStringAsFixed(0)}',
+                  '₹${_formatCurrency(getCalculatedPrice())}',
                   style: GoogleFonts.outfit(
                     fontSize: 22,
                     fontWeight: FontWeight.bold,
@@ -365,6 +472,17 @@ class _QuantitySelectionSheetState extends ConsumerState<QuantitySelectionSheet>
                 ),
                 onPressed: _isValidQty ? () {
                   final qty = getCalculatedQty();
+                  if (stock != null && qty > stock!) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(stock! <= 0
+                            ? 'This item is currently out of stock.'
+                            : 'Cannot add. Maximum available stock is ${formatQuantity(stock!, unit)}.'),
+                        backgroundColor: const Color(0xFFDC2626),
+                      ),
+                    );
+                    return;
+                  }
                   
                   HapticFeedback.lightImpact();
                   
@@ -400,8 +518,9 @@ class _QuantitySelectionSheetState extends ConsumerState<QuantitySelectionSheet>
           ],
         ),
       ),
-    );
-  }
+    ),
+  );
+}
 }
 
 void showQuantitySelectionBottomSheet({
@@ -455,7 +574,40 @@ class QuantitySelector extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final productId = product['id']?.toString() ?? '';
-    final isQuick = product['is_order_now'] == true;
+
+    final bool isQuick = product['is_order_now'] == true;
+    final double stockNum = ProductHelper.getStock(product, isOrderNow: isQuick);
+    final bool isAvail = ProductHelper.isAvailable(product, isOrderNow: isQuick);
+
+    const Color textColorPrimary = Color(0xFF3D1B0B);
+
+    if (!isAvail || stockNum <= 0) {
+      return Container(
+        height: 32,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFEF2F2),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: const Color(0xFFEF4444), width: 1.2),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.block_rounded, color: Color(0xFFDC2626), size: 12),
+            const SizedBox(width: 4),
+            Text(
+              'OUT OF STOCK',
+              style: GoogleFonts.inter(
+                fontWeight: FontWeight.w800,
+                fontSize: 9,
+                color: const Color(0xFFDC2626),
+                letterSpacing: 0.5,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     
     // Select only this product's quantity to isolate rebuild boundaries
     final currentQty = ref.watch(
@@ -463,8 +615,6 @@ class QuantitySelector extends ConsumerWidget {
         (state) => state.items[productId]?.quantity,
       ),
     );
-    
-    const Color textColorPrimary = Color(0xFF3D1B0B);
 
     if (currentQty == null || currentQty <= 0) {
       return SizedBox(
@@ -484,7 +634,7 @@ class QuantitySelector extends ConsumerWidget {
             showQuantitySelectionBottomSheet(
               context: context,
               ref: ref,
-              product: Map<String, dynamic>.from(product)..['is_order_now'] = isQuick,
+              product: product,
             );
           },
           child: Text('ADD', style: GoogleFonts.inter(fontWeight: FontWeight.bold, fontSize: 13)),
@@ -510,8 +660,12 @@ class QuantitySelector extends ConsumerWidget {
             constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
             onPressed: () {
               HapticFeedback.lightImpact();
-              final newQty = currentQty - step;
-              ref.read(isQuick ? quickCartProvider.notifier : cartProvider.notifier).updateQuantity(productId, newQty);
+              final newQty = ((currentQty - step) * 1000).round() / 1000.0;
+              if (isQuick) {
+                ref.read(quickCartProvider.notifier).updateQuantity(productId, newQty);
+              } else {
+                ref.read(cartProvider.notifier).updateQuantity(productId, newQty);
+              }
             },
           ),
           GestureDetector(
@@ -520,7 +674,7 @@ class QuantitySelector extends ConsumerWidget {
               showQuantitySelectionBottomSheet(
                 context: context,
                 ref: ref,
-                product: Map<String, dynamic>.from(product)..['is_order_now'] = isQuick,
+                product: product,
               );
             },
             child: Text(
@@ -538,10 +692,26 @@ class QuantitySelector extends ConsumerWidget {
             constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
             onPressed: () {
               HapticFeedback.lightImpact();
+              final isQuick = product['is_order_now'] == true;
+              final rawStock = isQuick ? product['order_now_stock'] : product['stock'];
+              final double? stockNum = (rawStock is num) ? rawStock.toDouble() : double.tryParse(rawStock?.toString() ?? '');
+              if (stockNum != null && (stockNum <= 0 || currentQty >= stockNum || currentQty + step > stockNum)) {
+                ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(stockNum <= 0
+                        ? 'This item is currently out of stock.'
+                        : 'Cannot add more. Maximum available stock is ${formatQuantity(stockNum, unit)}.'),
+                    backgroundColor: const Color(0xFFDC2626),
+                    duration: const Duration(seconds: 2),
+                  ),
+                );
+                return;
+              }
               showQuantitySelectionBottomSheet(
                 context: context,
                 ref: ref,
-                product: Map<String, dynamic>.from(product)..['is_order_now'] = isQuick,
+                product: product,
               );
             },
           ),
@@ -557,3 +727,15 @@ double getStepSize(String unit) {
   if (unitLower == 'g' || unitLower == 'gram' || unitLower == 'grams') return 250.0;
   return 1.0;
 }
+
+String _formatCurrency(double amount) {
+  if ((amount - amount.roundToDouble()).abs() < 0.01) {
+    return amount.round().toString();
+  }
+  final s = amount.toStringAsFixed(2);
+  if (s.endsWith('.00')) {
+    return amount.round().toString();
+  }
+  return s;
+}
+

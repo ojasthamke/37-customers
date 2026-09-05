@@ -4,7 +4,8 @@ buildscript {
         mavenCentral()
     }
     dependencies {
-        classpath 'com.google.gms:google-services:4.3.15'
+        classpath 'com.google.gms:google-services:4.4.1'
+        classpath 'com.google.firebase:firebase-crashlytics-gradle:3.0.2'
     }
 }
 
@@ -24,7 +25,7 @@ subprojects {
 }
 
 ext {
-    kotlin_version = '1.9.24'
+    kotlin_version = '2.1.0'
     flutter = [
         compileSdkVersion: 35,
         minSdkVersion: 21,

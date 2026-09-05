@@ -33,8 +33,28 @@ class _ProductDetailsScreenState extends ConsumerState<ProductDetailsScreen> {
             return const Center(child: Text('Product not found'));
           }
 
-          final double stock = (p['stock'] as num?)?.toDouble() ?? 0.0;
-          final isAvailable = (p['is_available'] == true || p['is_available'] == 1) && stock > 0;
+          final rawStockNum = (p['stock'] is num)
+              ? (p['stock'] as num).toDouble()
+              : double.tryParse(p['stock']?.toString() ?? '');
+          final isAvailable = (p['is_available'] == null ||
+                  p['is_available'] == true ||
+                  p['is_available'] == 1 ||
+                  p['is_available']?.toString() == '1' ||
+                  p['is_available']?.toString().toLowerCase() == 'true') &&
+              (p['is_enabled'] != false &&
+                  p['is_enabled'] != 0 &&
+                  p['is_enabled']?.toString() != '0' &&
+                  p['is_enabled']?.toString().toLowerCase() != 'false') &&
+              (rawStockNum != null && rawStockNum > 0);
+          final bool isExplicitlyUnavailable = !(p['is_available'] == null ||
+                  p['is_available'] == true ||
+                  p['is_available'] == 1 ||
+                  p['is_available']?.toString() == '1' ||
+                  p['is_available']?.toString().toLowerCase() == 'true') ||
+              (p['is_enabled'] == false ||
+                  p['is_enabled'] == 0 ||
+                  p['is_enabled']?.toString() == '0' ||
+                  p['is_enabled']?.toString().toLowerCase() == 'false');
 
           return SingleChildScrollView(
             child: Column(
@@ -77,7 +97,9 @@ class _ProductDetailsScreenState extends ConsumerState<ProductDetailsScreen> {
                           borderRadius: BorderRadius.circular(8),
                         ),
                         child: Text(
-                          isAvailable ? 'IN STOCK' : 'OUT OF STOCK',
+                          isAvailable
+                              ? 'IN STOCK'
+                              : (isExplicitlyUnavailable ? 'UNAVAILABLE' : 'OUT OF STOCK'),
                           style: TextStyle(
                             color: isAvailable ? Colors.green : Colors.red,
                             fontWeight: FontWeight.bold,
@@ -126,7 +148,7 @@ class _ProductDetailsScreenState extends ConsumerState<ProductDetailsScreen> {
                       // Price
                       if ((p['unit'] as String? ?? 'kg').toLowerCase().contains('kg')) ...[
                         Text(
-                          '₹${(((p['price'] as num?)?.toDouble() ?? 0.0) / 4).toStringAsFixed(0)}/250g',
+                          '₹${_formatCurrency(((p['price'] as num?)?.toDouble() ?? 0.0) / 4)}/250g',
                           style: theme.textTheme.titleLarge?.copyWith(
                             color: theme.colorScheme.primary,
                             fontWeight: FontWeight.bold,
@@ -135,7 +157,7 @@ class _ProductDetailsScreenState extends ConsumerState<ProductDetailsScreen> {
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          '₹${(p['price'] as num?)?.toStringAsFixed(0) ?? '0'} per kg',
+                          '₹${_formatCurrency((p['price'] as num?)?.toDouble() ?? 0.0)} per kg',
                           style: TextStyle(
                             color: Colors.green[700],
                             fontSize: 15,
@@ -144,7 +166,7 @@ class _ProductDetailsScreenState extends ConsumerState<ProductDetailsScreen> {
                         ),
                       ] else ...[
                         Text(
-                          '₹${(p['price'] as num?)?.toStringAsFixed(0) ?? '0'}/${p['unit']}',
+                          '₹${_formatCurrency((p['price'] as num?)?.toDouble() ?? 0.0)}/${p['unit']}',
                           style: theme.textTheme.titleLarge?.copyWith(
                             color: theme.colorScheme.primary,
                             fontWeight: FontWeight.bold,
@@ -276,3 +298,15 @@ class _ProductDetailsScreenState extends ConsumerState<ProductDetailsScreen> {
     );
   }
 }
+
+String _formatCurrency(double amount) {
+  if ((amount - amount.roundToDouble()).abs() < 0.01) {
+    return amount.round().toString();
+  }
+  final s = amount.toStringAsFixed(2);
+  if (s.endsWith('.00')) {
+    return amount.round().toString();
+  }
+  return s;
+}
+

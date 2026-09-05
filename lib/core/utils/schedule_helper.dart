@@ -11,10 +11,22 @@ class AreaScheduleHelper {
     'Sunday'
   ];
 
-  /// Returns the current time converted to the authoritative Indian Standard Time (UTC+5:30)
+  static Duration _serverTimeOffset = Duration.zero;
+
+  /// Calibrates device time against authoritative server time
+  static void calibrateWithServerTime(DateTime serverUtcTime) {
+    final deviceUtc = DateTime.now().toUtc();
+    _serverTimeOffset = serverUtcTime.toUtc().difference(deviceUtc);
+  }
+
+  /// Returns the current time converted to the authoritative Indian Standard Time (UTC+5:30),
+  /// compensated for any device clock drift or skewed timezone.
   static DateTime getKolkataTime([DateTime? customNow]) {
-    final base = customNow ?? DateTime.now();
-    return base.toUtc().add(const Duration(hours: 5, minutes: 30));
+    if (customNow != null) {
+      return (customNow.isUtc ? customNow : customNow.toUtc()).add(const Duration(hours: 5, minutes: 30));
+    }
+    final baseUtc = DateTime.now().toUtc().add(_serverTimeOffset);
+    return baseUtc.add(const Duration(hours: 5, minutes: 30));
   }
 
   /// Calculates order schedule details for the given list of order-taking days and optional cutoff time string (e.g. "20:00:00")

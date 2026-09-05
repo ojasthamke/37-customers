@@ -103,9 +103,9 @@ void main() {
       expect(cartNotifier.state.baseDeliveryCharge, 0.0);
       // Unrounded: 367.50 -> Ceil to 5: 370.00 -> Rounding Diff: 2.50
       expect(cartNotifier.state.unroundedGrandTotal, 367.50);
-      expect(cartNotifier.state.roundedGrandTotal, 370.0);
-      expect(cartNotifier.state.deliveryCharge, closeTo(2.50, 0.001));
-      expect(cartNotifier.state.subtotal + cartNotifier.state.deliveryCharge, cartNotifier.state.grandTotal);
+      expect(cartNotifier.state.deliveryCharge, 0.0);
+      expect(cartNotifier.state.separateRoundingAdjustment, closeTo(2.50, 0.001));
+      expect(cartNotifier.state.subtotal + cartNotifier.state.deliveryCharge + cartNotifier.state.separateRoundingAdjustment, cartNotifier.state.grandTotal);
     });
 
     test('3. Duplicate Product Merging: Adding existing product aggregates quantities without duplicating keys', () {
@@ -362,8 +362,9 @@ void main() {
       expect(normalCart.state.unroundedGrandTotal, 300.01);
       expect(normalCart.state.roundedGrandTotal, 305.0);
       expect(normalCart.state.roundingDifference, closeTo(4.99, 0.001));
-      expect(normalCart.state.deliveryCharge, closeTo(4.99, 0.001));
-      expect(normalCart.state.subtotal + normalCart.state.deliveryCharge, normalCart.state.grandTotal);
+      expect(normalCart.state.deliveryCharge, 0.0);
+      expect(normalCart.state.separateRoundingAdjustment, closeTo(4.99, 0.001));
+      expect(normalCart.state.subtotal + normalCart.state.deliveryCharge + normalCart.state.separateRoundingAdjustment, closeTo(normalCart.state.grandTotal, 0.001));
     });
 
     test('11. Product Image Synchronization & Preservation in CartItem', () {
@@ -469,7 +470,7 @@ void main() {
         expect(state.itemCount, itemCount);
         expect(state.subtotal, closeTo(manualSubtotal, 0.001));
         expect(state.grandTotal, state.roundedGrandTotal);
-        expect(state.subtotal + state.deliveryCharge, state.grandTotal);
+        expect(state.subtotal + state.deliveryCharge + state.separateRoundingAdjustment, closeTo(state.grandTotal, 0.001));
 
         if (state.subtotal >= state.freeDeliveryLimit) {
           expect(state.baseDeliveryCharge, 0.0);

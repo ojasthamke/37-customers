@@ -9,10 +9,31 @@
       "client_info": {
         "mobilesdk_app_id": "1:177314279725:android:a62c1e924da4b3bcc3e3a4",
         "android_client_info": {
-          "package_name": "com.orderkart.app"
+          "package_name": "com.example.aplibhaji_customers"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "177314279725-gb15grgfngegd5ndiaahfj41coep8suf.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.aplibhaji_customers",
+            "certificate_hash": "58fcfdc3b259527478b3c874ebfc18bdcd98f506"
+          }
+        },
+        {
+          "client_id": "177314279725-oummjr4n8magtsuneuu6s3pi3jl9a5sn.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.aplibhaji_customers",
+            "certificate_hash": "ca6d498b2163af6217b1875b2003caa066ba2241"
+          }
+        },
+        {
+          "client_id": "177314279725-6vtc8rspo2c749e3h89tqrgfpts2ovft.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyCcpfhCazk8-pVFBH3a6tGKYvx9DY-uibo"
@@ -20,18 +41,36 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "177314279725-6vtc8rspo2c749e3h89tqrgfpts2ovft.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     },
     {
       "client_info": {
-        "mobilesdk_app_id": "1:177314279725:android:a62c1e924da4b3bcc3e3a4",
+        "mobilesdk_app_id": "1:177314279725:android:64567922fa4a020ac3e3a4",
         "android_client_info": {
-          "package_name": "com.example.aplibhaji_customers"
+          "package_name": "com.orderkart.app"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "177314279725-dcle0pbqdhmmqvrh8fv0hgmrd90tgvpe.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.orderkart.app",
+            "certificate_hash": "df4555522c4c76d02d74655f10f6aabafa25f346"
+          }
+        },
+        {
+          "client_id": "177314279725-6vtc8rspo2c749e3h89tqrgfpts2ovft.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyCcpfhCazk8-pVFBH3a6tGKYvx9DY-uibo"
@@ -39,7 +78,12 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "177314279725-6vtc8rspo2c749e3h89tqrgfpts2ovft.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     }

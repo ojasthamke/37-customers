@@ -10,6 +10,8 @@ import 'legal/policy_models.dart';
 import 'legal/policy_detail_screen.dart';
 import '../../core/utils/string_utils.dart';
 import '../../core/widgets/ambient_background.dart';
+import '../../core/widgets/delivery_address_edit_sheet.dart';
+import '../../core/services/crash_observability_service.dart';
 
 class ProfileScreen extends ConsumerStatefulWidget {
   final bool showAppBar;
@@ -282,15 +284,93 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
             onPressed: () async {
               Navigator.pop(context);
               await ref.read(authProvider.notifier).logout();
-              
-              if (!context.mounted) return;
-              Navigator.pushAndRemoveUntil(
-                context,
-                MaterialPageRoute(builder: (context) => const LoginScreen()),
-                (route) => false,
-              );
             },
             child: const Text('Logout'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showDiagnosticsDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: bgCard,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.blue.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Icon(Icons.bug_report_outlined, color: Colors.blue, size: 24),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'Crash Diagnostics',
+                style: GoogleFonts.playfairDisplay(
+                  fontWeight: FontWeight.bold,
+                  color: textColorPrimary,
+                  fontSize: 20,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Firebase Crashlytics is actively monitoring this build for unexpected crashes, ANRs, and background errors.',
+              style: GoogleFonts.inter(fontSize: 13, color: textColorPrimary),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFEFF6FF),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFFBFDBFE)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    '⚡ Test Crash Tool',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFF1D4ED8)),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Pressing the button below intentionally throws a test crash to verify that your Firebase Console receives reports.',
+                    style: GoogleFonts.inter(fontSize: 12, color: const Color(0xFF1E40AF)),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close', style: TextStyle(color: textColorSecondary, fontWeight: FontWeight.bold)),
+          ),
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+            icon: const Icon(Icons.warning_amber_rounded, size: 18),
+            label: const Text('Trigger Test Crash'),
+            onPressed: () {
+              Navigator.pop(context);
+              CrashObservabilityService.instance.testCrash();
+            },
           ),
         ],
       ),
@@ -426,18 +506,31 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   @override
   Widget build(BuildContext context) {
     final authState = ref.watch(authProvider);
-    final bool isGuest = authState.customer == null;
+    final bool isGuest = authState.customer == null ||
+        authState.customer!['is_guest'] == true ||
+        authState.customer!['is_guest'] == 1 ||
+        authState.customer!['is_guest']?.toString() == '1' ||
+        authState.customer!['is_guest']?.toString().toLowerCase() == 'true';
 
     final String name = isGuest
         ? 'Guest User'
         : sanitizeCustomerName(authState.customer!['name'], customerCode: authState.customer!['customer_code']);
     final String phone = isGuest ? 'Guest Access' : (authState.customer!['phone'] ?? 'N/A');
-    final String address = isGuest ? 'Set during checkout' : (authState.customer!['address'] ?? 'N/A');
     final String code = isGuest ? 'GUEST' : (authState.customer!['customer_code'] ?? 'N/A');
-    final String areaName = isGuest ? 'Select Area' : (authState.customer!['area_name'] ?? 'N/A');
-    final String roadName = isGuest ? '' : (authState.customer!['road_name'] ?? 'N/A');
+    final String areaName = isGuest ? 'Select Area' : (authState.customer!['area_name'] ?? '');
+    final String roadName = isGuest ? '' : (authState.customer!['road_name'] ?? '');
     final String subRoadName = isGuest ? '' : (authState.customer!['sub_road_name'] ?? '');
     final String routeDetails = subRoadName.isNotEmpty ? '$roadName ($subRoadName)' : roadName;
+
+    String resolvedAddr = (authState.customer?['address'] as String? ?? '').trim();
+    if (resolvedAddr.isEmpty || resolvedAddr.toUpperCase() == 'N/A') {
+      final parts = <String>[
+        if (roadName.isNotEmpty && roadName != 'N/A') roadName,
+        if (areaName.isNotEmpty && areaName != 'N/A' && !roadName.contains(areaName)) areaName,
+      ];
+      resolvedAddr = parts.isNotEmpty ? parts.join(', ') : 'Not set';
+    }
+    final String address = isGuest ? 'Set during checkout' : resolvedAddr;
 
     Widget content = SingleChildScrollView(
       physics: const AlwaysScrollableScrollPhysics(),
@@ -527,7 +620,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
           ),
           const SizedBox(height: 28),
 
-          // static customer details list
+          // Customer details list with Edit action
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -537,6 +630,23 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   fontSize: 18,
                   fontWeight: FontWeight.bold,
                   color: textColorPrimary,
+                ),
+              ),
+              TextButton.icon(
+                onPressed: () {
+                  DeliveryAddressEditSheet.show(
+                    context,
+                    initialCustomer: authState.customer,
+                  );
+                },
+                icon: const Icon(Icons.edit_location_alt_outlined, size: 16, color: textColorPrimary),
+                label: const Text(
+                  'Edit Address',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: textColorPrimary,
+                    fontSize: 13,
+                  ),
                 ),
               ),
             ],
@@ -558,6 +668,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                     phone,
                     style: const TextStyle(fontWeight: FontWeight.bold, color: textColorPrimary, fontSize: 15),
                   ),
+                  trailing: const Icon(Icons.lock_outline, size: 16, color: textColorSecondary),
                 ),
                 const Divider(height: 1, indent: 56),
                 ListTile(
@@ -567,24 +678,41 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                     address,
                     style: const TextStyle(fontWeight: FontWeight.bold, color: textColorPrimary, fontSize: 14),
                   ),
+                  trailing: const Icon(Icons.edit_outlined, size: 18, color: textColorSecondary),
+                  onTap: () {
+                    DeliveryAddressEditSheet.show(
+                      context,
+                      initialCustomer: authState.customer,
+                    );
+                  },
                 ),
                 const Divider(height: 1, indent: 56),
                 ListTile(
                   leading: const Icon(Icons.map_outlined, color: textColorPrimary),
                   title: const Text('Delivery Area', style: TextStyle(fontSize: 12, color: textColorSecondary)),
                   subtitle: Text(
-                    areaName,
-                    style: const TextStyle(fontWeight: FontWeight.bold, color: textColorPrimary, fontSize: 14),
+                    areaName.isNotEmpty ? areaName : 'Assigned by Store',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: areaName.isNotEmpty ? textColorPrimary : textColorSecondary,
+                      fontSize: 14,
+                    ),
                   ),
+                  trailing: const Icon(Icons.lock_outline, size: 16, color: textColorSecondary),
                 ),
                 const Divider(height: 1, indent: 56),
                 ListTile(
                   leading: const Icon(Icons.route_outlined, color: textColorPrimary),
                   title: const Text('Delivery Route', style: TextStyle(fontSize: 12, color: textColorSecondary)),
                   subtitle: Text(
-                    routeDetails,
-                    style: const TextStyle(fontWeight: FontWeight.bold, color: textColorPrimary, fontSize: 14),
+                    routeDetails.isNotEmpty ? routeDetails : 'Assigned by Store',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: routeDetails.isNotEmpty ? textColorPrimary : textColorSecondary,
+                      fontSize: 14,
+                    ),
                   ),
+                  trailing: const Icon(Icons.lock_outline, size: 16, color: textColorSecondary),
                 ),
               ],
             ),
@@ -626,6 +754,14 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   title: const Text('Contact Help & Support', style: TextStyle(fontWeight: FontWeight.bold, color: textColorPrimary)),
                   trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 14, color: textColorSecondary),
                   onTap: () => _showHelpBottomSheet(context, ref),
+                ),
+                const Divider(height: 1, indent: 56),
+                ListTile(
+                  leading: const Icon(Icons.bug_report_outlined, color: textColorPrimary),
+                  title: const Text('App Health & Diagnostics', style: TextStyle(fontWeight: FontWeight.bold, color: textColorPrimary)),
+                  subtitle: const Text('Firebase Crashlytics & Telemetry', style: TextStyle(fontSize: 11, color: textColorSecondary)),
+                  trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 14, color: textColorSecondary),
+                  onTap: () => _showDiagnosticsDialog(context),
                 ),
                 const Divider(height: 1, indent: 56),
                 ListTile(

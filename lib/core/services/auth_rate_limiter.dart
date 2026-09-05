@@ -1,15 +1,16 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 import 'package:sqflite/sqflite.dart';
 import '../database/database_helper.dart';
 
-/// Persistent Security & Rate Limiting Manager
+/// Server-Authoritative & Local Persistent Rate Limiting Manager
 /// Rules:
-/// 1. 10 failed attempts -> 1-Hour Lockout.
-/// 2. If 1-Hour Lockout happens 8 times -> 3-Day Lockout.
-/// 3. App Session ID persisted in local storage.
-/// 4. All state survives app restarts and process kills.
+/// 1. 10 failed attempts -> 1-Hour Server Lockout.
+/// 2. If 1-Hour Lockout happens 8 times -> 3-Day Server Lockout.
+/// 3. Server PostgreSQL auth_rate_limits table is the authoritative source.
+/// 4. Survives Clear Data, App Reinstall, App Restarts, and Clock Tampering.
 class AuthRateLimiter {
   AuthRateLimiter._();
   static final AuthRateLimiter instance = AuthRateLimiter._();
@@ -33,7 +34,7 @@ class AuthRateLimiter {
   DateTime? get lockoutUntil => _lockoutUntil;
   String get lockoutType => _lockoutType;
 
-  /// Initialize security state from SQLite local storage
+  /// Initialize security state from SQLite local storage (as an offline cache)
   Future<void> init() async {
     if (_initialized) return;
     try {
@@ -56,7 +57,7 @@ class AuthRateLimiter {
         _failedAttempts = int.tryParse(map['auth_failed_attempts']!) ?? 0;
       }
 
-      // 3. Hourly Lockout Count (triggers 3-day lockout on 8th occurrence)
+      // 3. Hourly Lockout Count
       if (map.containsKey('auth_hourly_lockout_count')) {
         _hourlyLockoutCount = int.tryParse(map['auth_hourly_lockout_count']!) ?? 0;
       }
@@ -70,7 +71,6 @@ class AuthRateLimiter {
         if (parsed != null && DateTime.now().isBefore(parsed)) {
           _lockoutUntil = parsed;
         } else {
-          // Lockout has already expired
           _lockoutUntil = null;
           _lockoutType = '';
           await _saveSetting(db, 'auth_lockout_until', '');
@@ -79,19 +79,61 @@ class AuthRateLimiter {
       }
 
       _initialized = true;
-      debugPrint('[AuthRateLimiter] Initialized. Session: $_sessionId, Failed: $_failedAttempts, Lockouts: $_hourlyLockoutCount, LockedUntil: $_lockoutUntil');
     } catch (e) {
       debugPrint('[AuthRateLimiter] Init error: $e');
     }
   }
 
-  /// Check if login is currently locked out
+  /// Check server authoritative lockout for a specific customer identifier (code/phone)
+  Future<Map<String, dynamic>> checkServerLockout(String identifier) async {
+    final normId = identifier.trim().toUpperCase();
+    if (normId.isEmpty) {
+      return {'is_locked': false, 'remaining_attempts': maxFailedAttempts};
+    }
+
+    try {
+      final client = Supabase.instance.client;
+      final res = await client.rpc('check_auth_lockout', params: {
+        'p_identifier': normId,
+      }).timeout(const Duration(seconds: 4));
+
+      if (res != null && res is Map) {
+        final isLocked = res['is_locked'] == true;
+        if (isLocked) {
+          final untilStr = res['locked_until'] as String?;
+          final remainingSecs = (res['remaining_seconds'] as num?)?.toInt() ?? 3600;
+          _lockoutUntil = untilStr != null
+              ? DateTime.tryParse(untilStr) ?? DateTime.now().add(Duration(seconds: remainingSecs))
+              : DateTime.now().add(Duration(seconds: remainingSecs));
+          _lockoutType = res['lockout_type'] as String? ?? '1hr';
+          await _persistState();
+        } else {
+          _failedAttempts = (res['failed_attempts'] as num?)?.toInt() ?? 0;
+          if (_lockoutUntil != null && isLockedOut()) {
+            _lockoutUntil = null;
+            _lockoutType = '';
+            await _persistState();
+          }
+        }
+        return Map<String, dynamic>.from(res);
+      }
+    } catch (e) {
+      debugPrint('[AuthRateLimiter] Server lockout check fallback: $e');
+    }
+
+    return {
+      'is_locked': isLockedOut(),
+      'remaining_attempts': remainingAttempts,
+      'locked_until': _lockoutUntil?.toIso8601String(),
+    };
+  }
+
+  /// Check if login is currently locked out (local check with server sync)
   bool isLockedOut() {
     if (_lockoutUntil == null) return false;
     if (DateTime.now().isBefore(_lockoutUntil!)) {
       return true;
     } else {
-      // Cooldown expired
       _lockoutUntil = null;
       _lockoutType = '';
       _clearLockoutInDb();
@@ -137,28 +179,56 @@ class AuthRateLimiter {
     }
   }
 
-  /// Record a failed login attempt and persist state
-  Future<String> recordFailedAttempt() async {
+  /// Record a failed login attempt authoritatively on server and persist locally
+  Future<String> recordFailedAttempt({String? identifier}) async {
     await init();
+    final normId = (identifier ?? '').trim().toUpperCase();
+
+    if (normId.isNotEmpty) {
+      try {
+        final client = Supabase.instance.client;
+        final res = await client.rpc('record_auth_failure', params: {
+          'p_identifier': normId,
+        }).timeout(const Duration(seconds: 4));
+
+        if (res != null && res is Map) {
+          final isLocked = res['is_locked'] == true;
+          if (isLocked) {
+            final untilStr = res['locked_until'] as String?;
+            final remainingSecs = (res['remaining_seconds'] as num?)?.toInt() ?? 3600;
+            _lockoutUntil = untilStr != null
+                ? DateTime.tryParse(untilStr) ?? DateTime.now().add(Duration(seconds: remainingSecs))
+                : DateTime.now().add(Duration(seconds: remainingSecs));
+            _lockoutType = res['lockout_type'] as String? ?? '1hr';
+            _failedAttempts = 0;
+            await _persistState();
+            return res['message'] as String? ?? getLockoutErrorMessage();
+          } else {
+            _failedAttempts = (res['failed_attempts'] as num?)?.toInt() ?? (_failedAttempts + 1);
+            await _persistState();
+            return res['message'] as String? ?? 'Invalid credentials. $remainingAttempts attempts remaining before 1-hour lockout.';
+          }
+        }
+      } catch (e) {
+        debugPrint('[AuthRateLimiter] Server record failure error: $e');
+      }
+    }
+
+    // Local fallback if network fails
     _failedAttempts++;
-
     String message;
-
     if (_failedAttempts >= maxFailedAttempts) {
       _hourlyLockoutCount++;
       _failedAttempts = 0;
-
       if (_hourlyLockoutCount >= maxHourlyLockoutsBefore3Days) {
-        // Trigger 3-Day Lockout
         _lockoutUntil = DateTime.now().add(threeDayLockoutDuration);
         _lockoutType = '3days';
-        _hourlyLockoutCount = 0; // Reset after 3-day penalty
+        _hourlyLockoutCount = 0;
         message = 'Account locked for 3 days due to 8 repeated 1-hour lockouts.';
       } else {
-        // Trigger 1-Hour Lockout
         _lockoutUntil = DateTime.now().add(hourlyLockoutDuration);
         _lockoutType = '1hr';
-        message = 'Account locked for 1 hour due to $maxFailedAttempts failed attempts. ($hourlyLockoutCount/$maxHourlyLockoutsBefore3Days 1-hour penalties used).';
+        message = 'Account locked for 1 hour due to $maxFailedAttempts failed attempts.';
       }
     } else {
       final remaining = maxFailedAttempts - _failedAttempts;
@@ -169,14 +239,26 @@ class AuthRateLimiter {
     return message;
   }
 
-  /// Record a successful login and clear failed attempts
-  Future<void> recordSuccessfulLogin() async {
+  /// Record a successful login authoritatively on server and clear local state
+  Future<void> recordSuccessfulLogin({String? identifier}) async {
     await init();
     _failedAttempts = 0;
     _hourlyLockoutCount = 0;
     _lockoutUntil = null;
     _lockoutType = '';
     await _persistState();
+
+    final normId = (identifier ?? '').trim().toUpperCase();
+    if (normId.isNotEmpty) {
+      try {
+        final client = Supabase.instance.client;
+        await client.rpc('record_auth_success', params: {
+          'p_identifier': normId,
+        }).timeout(const Duration(seconds: 4));
+      } catch (e) {
+        debugPrint('[AuthRateLimiter] Server record success error: $e');
+      }
+    }
   }
 
   Future<void> _persistState() async {
