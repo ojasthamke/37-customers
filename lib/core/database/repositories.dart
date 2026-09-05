@@ -38,6 +38,7 @@ abstract class CustomerRepository {
   Future<Map<String, dynamic>?> login(String phone, String password);
   Future<Map<String, dynamic>?> loginWithCode(String code);
   Future<Map<String, dynamic>?> loginWithCodeAndPassword(String code, String password);
+  Future<Map<String, dynamic>?> loginWithVerifiedPhone(String phone, {String? firebaseUid});
   Future<Map<String, dynamic>?> loginWithGoogle();
   Future<Map<String, dynamic>?> completeGoogleOnboarding({
     required String customerId,
@@ -298,6 +299,25 @@ class SQLiteCustomerRepository implements CustomerRepository {
   Future<Map<String, dynamic>?> loginWithCodeAndPassword(String code, String password) async {
     // Plaintext or hashed passwords are never stored in SQLite local cache.
     // Offline authentication is disabled for security; remote Supabase is the single source of truth.
+    return null;
+  }
+
+  @override
+  Future<Map<String, dynamic>?> loginWithVerifiedPhone(String phone, {String? firebaseUid}) async {
+    final db = await _dbHelper.database;
+    final cleanPhone = phone.replaceAll(RegExp(r'\D'), '').trim();
+    final last10 = cleanPhone.length >= 10 ? cleanPhone.substring(cleanPhone.length - 10) : cleanPhone;
+    final res = await db.query(
+      'customers',
+      where: 'phone = ? OR phone LIKE ?',
+      whereArgs: [phone, '%$last10'],
+    );
+    if (res.isNotEmpty) {
+      final customer = res.first;
+      await db.update('customers', {'is_logged_in': 1}, where: 'id = ?', whereArgs: [customer['id']]);
+      await db.update('customers', {'is_logged_in': 0}, where: 'id != ?', whereArgs: [customer['id']]);
+      return _parseCustomer({...customer, 'is_logged_in': 1});
+    }
     return null;
   }
 
@@ -988,6 +1008,53 @@ class SupabaseCustomerRepository implements CustomerRepository {
       rethrow;
     }
     return null;
+  }
+
+  @override
+  Future<Map<String, dynamic>?> loginWithVerifiedPhone(String phone, {String? firebaseUid}) async {
+    try {
+      final cleanPhone = phone.replaceAll(RegExp(r'\D'), '').trim();
+      final last10 = cleanPhone.length >= 10 ? cleanPhone.substring(cleanPhone.length - 10) : cleanPhone;
+
+      // 1. First check if customer exists in Supabase by phone or last 10 digits
+      final response = await _client
+          .from('customers')
+          .select('*, areas(name, delivery_schedule, cutoff_time), roads(name), sub_roads(name)')
+          .or('phone.eq.$cleanPhone,phone.eq.+91$last10,phone.like.%$last10')
+          .limit(1);
+
+      if (response.isNotEmpty) {
+        final customer = response.first;
+        final Map<String, dynamic> mapped = Map.from(customer);
+        final area = customer['areas'] as Map<String, dynamic>?;
+        final road = customer['roads'] as Map<String, dynamic>?;
+        final subRoad = customer['sub_roads'] as Map<String, dynamic>?;
+        mapped['area_name'] = area?['name'];
+        mapped['delivery_schedule'] = area?['delivery_schedule'];
+        mapped['cutoff_time'] = area?['cutoff_time'];
+        mapped['road_name'] = road?['name'];
+        mapped['sub_road_name'] = subRoad?['name'];
+        mapped['firebase_uid'] = firebaseUid;
+        return _enrichCustomerAddress(mapped);
+      } else {
+        // Brand new customer with verified phone number -> create initial customer record
+        final newCode = 'OK${last10.length >= 4 ? last10.substring(last10.length - 4) : last10}';
+        final insertRes = await _client.from('customers').insert({
+          'name': 'Customer $last10',
+          'phone': cleanPhone.length == 10 ? '+91$cleanPhone' : cleanPhone,
+          'customer_code': newCode,
+          'is_active': 1,
+        }).select('*, areas(name, delivery_schedule, cutoff_time), roads(name), sub_roads(name)').single();
+
+        final Map<String, dynamic> mapped = Map.from(insertRes);
+        mapped['is_brand_new'] = true;
+        mapped['firebase_uid'] = firebaseUid;
+        return _enrichCustomerAddress(mapped);
+      }
+    } catch (e) {
+      debugPrint('Supabase loginWithVerifiedPhone error: $e');
+      rethrow;
+    }
   }
 
   @override

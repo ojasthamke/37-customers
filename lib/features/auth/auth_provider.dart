@@ -371,6 +371,62 @@ class AuthNotifier extends StateNotifier<AuthState> {
     return true;
   }
 
+  /// Sign in with Firebase Verified Phone (SMS OTP)
+  Future<Map<String, dynamic>?> loginWithPhoneOtp({
+    required String phone,
+    String? firebaseUid,
+  }) async {
+    final cleanPhone = phone.trim();
+    await AuthRateLimiter.instance.checkServerLockout(cleanPhone);
+    if (AuthRateLimiter.instance.isLockedOut()) {
+      state = AuthState(isLoading: false, error: AuthRateLimiter.instance.getLockoutErrorMessage());
+      return null;
+    }
+
+    state = state.copyWith(isLoading: true);
+    try {
+      final repo = _ref.read(customerRepositoryProvider);
+      final customer = await repo.loginWithVerifiedPhone(cleanPhone, firebaseUid: firebaseUid);
+      if (customer != null) {
+        await AuthRateLimiter.instance.recordSuccessfulLogin(identifier: cleanPhone);
+        state = AuthState(customer: customer, isLoading: false);
+        try {
+          LoginTrackerService.instance.recordLogin(
+            customer: customer,
+            loginMethod: 'Firebase Phone OTP',
+          );
+        } catch (_) {}
+        if (customer['id'] != null) {
+          NotificationService.instance.registerFCMToken(customer['id'].toString());
+        }
+        _ref.invalidate(categoriesProvider);
+        _ref.invalidate(popularProductsProvider);
+        _ref.invalidate(appSettingsProvider);
+        _ref.invalidate(activeCartNotifierProvider);
+        return customer;
+      } else {
+        final errorMsg = await AuthRateLimiter.instance.recordFailedAttempt(identifier: cleanPhone);
+        state = AuthState(
+          isLoading: false,
+          error: AuthRateLimiter.instance.isLockedOut()
+              ? AuthRateLimiter.instance.getLockoutErrorMessage()
+              : errorMsg,
+        );
+        return null;
+      }
+    } catch (e) {
+      final cleanError = e.toString().replaceAll('Exception: ', '').trim();
+      final errorMsg = await AuthRateLimiter.instance.recordFailedAttempt(identifier: cleanPhone);
+      state = AuthState(
+        isLoading: false,
+        error: AuthRateLimiter.instance.isLockedOut()
+            ? AuthRateLimiter.instance.getLockoutErrorMessage()
+            : (cleanError.isNotEmpty ? cleanError : errorMsg),
+      );
+      rethrow;
+    }
+  }
+
   /// Sign in with Google (triggers Google Sign-In SDK and links account)
   Future<Map<String, dynamic>?> loginWithGoogle() async {
     state = state.copyWith(isLoading: true);

@@ -14,6 +14,7 @@ import '../../core/widgets/shake_widget.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'register_screen.dart';
 import 'google_onboarding_sheet.dart';
+import 'phone_login_sheet.dart';
 
 // ============================================================
 // MAIN LOGIN SCREEN WITH SELECTION PANEL (LOGIN & SETUP MODES)
@@ -684,7 +685,88 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 ),
                 const SizedBox(height: 32),
                 
-                // Option A: Yes, I have password
+                // Option 1: Mobile Number OTP Login
+                InkWell(
+                  onTap: () => PhoneLoginSheet.show(context),
+                  borderRadius: BorderRadius.circular(20),
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1B3624),
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFF1B3624).withValues(alpha: 0.2),
+                          blurRadius: 12,
+                          offset: const Offset(0, 5),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Icon(Icons.phone_iphone_rounded, color: Colors.white, size: 26),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      'Sign in with Mobile Number',
+                                      style: GoogleFonts.outfit(
+                                        fontSize: 15.5,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFD4AF37),
+                                      borderRadius: BorderRadius.circular(6),
+                                    ),
+                                    child: const Text(
+                                      'OTP',
+                                      style: TextStyle(
+                                        color: Color(0xFF1B3624),
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w900,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'Instant 1-tap login with SMS verification',
+                                style: GoogleFonts.inter(
+                                  fontSize: 12,
+                                  color: Colors.white70,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const Icon(Icons.arrow_forward_ios_rounded, color: Colors.white70, size: 16),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 18),
+
+                // Option 2: Yes, I have password
                 InkWell(
                   onTap: () {
                     setState(() {
@@ -696,11 +778,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     width: double.infinity,
                     padding: const EdgeInsets.all(20),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF1B3624),
+                      color: Colors.white,
                       borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: const Color(0xFFE2E8F0), width: 1.5),
                       boxShadow: [
                         BoxShadow(
-                          color: const Color(0xFF1B3624).withValues(alpha: 0.15),
+                          color: Colors.black.withValues(alpha: 0.04),
                           blurRadius: 10,
                           offset: const Offset(0, 5),
                         ),
@@ -708,7 +791,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     ),
                     child: Row(
                       children: [
-                        const Icon(Icons.lock_open_rounded, color: Colors.white, size: 28),
+                        const Icon(Icons.lock_open_rounded, color: Color(0xFF1B3624), size: 28),
                         const SizedBox(width: 16),
                         Expanded(
                           child: Column(
@@ -719,21 +802,21 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                                 style: GoogleFonts.outfit(
                                   fontSize: 16,
                                   fontWeight: FontWeight.bold,
-                                  color: Colors.white,
+                                  color: const Color(0xFF1B3624),
                                 ),
                               ),
                               const SizedBox(height: 4),
                               Text(
-                                'Sign in with your Customer Code and Password',
+                                'Sign in with your Customer Code / Phone & Password',
                                 style: GoogleFonts.inter(
                                   fontSize: 12,
-                                  color: Colors.white70,
+                                  color: const Color(0xFF64748B),
                                 ),
                               ),
                             ],
                           ),
                         ),
-                        const Icon(Icons.arrow_forward_ios_rounded, color: Colors.white70, size: 16),
+                        const Icon(Icons.arrow_forward_ios_rounded, color: Color(0xFF64748B), size: 16),
                       ],
                     ),
                   ),
@@ -1101,8 +1184,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                             textCapitalization: TextCapitalization.characters,
                             decoration: InputDecoration(
                               labelText: 'Customer Code',
-                              prefixIcon: const Icon(Icons.vpn_key_outlined, size: 20, color: Color(0xFF1B3624)),
-                              hintText: 'e.g. OK1025',
+                              prefixIcon: const Icon(Icons.person_outline_rounded, size: 20, color: Color(0xFF1B3624)),
+                              hintText: 'e.g. OK1025 or Mobile Number',
+                              helperText: 'Enter your Customer Code or registered 10-digit mobile number',
                               filled: true,
                               fillColor: const Color(0xFFF8FAFC),
                               border: OutlineInputBorder(
@@ -1116,7 +1200,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                             ),
                             validator: (val) {
                               if (val == null || val.trim().isEmpty) {
-                                return 'Please enter your customer code';
+                                return 'Please enter your Customer Code or Mobile Number';
                               }
                               return null;
                             },

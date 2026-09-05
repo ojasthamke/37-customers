@@ -888,6 +888,22 @@ class CachingCustomerRepository implements CustomerRepository {
   }
 
   @override
+  Future<Map<String, dynamic>?> loginWithVerifiedPhone(String phone, {String? firebaseUid}) async {
+    try {
+      final customer = await _remote.loginWithVerifiedPhone(phone, firebaseUid: firebaseUid);
+      if (customer != null) {
+        await _cacheCustomer(customer);
+      }
+      return customer;
+    } catch (e) {
+      debugPrint('CachingCustomer: Supabase loginWithVerifiedPhone failed, trying local: $e');
+      final local = await _local.loginWithVerifiedPhone(phone, firebaseUid: firebaseUid);
+      if (local != null) return local;
+      rethrow;
+    }
+  }
+
+  @override
   Future<Map<String, dynamic>?> loginWithGoogle() async {
     try {
       final customer = await _remote.loginWithGoogle();
