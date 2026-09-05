@@ -50,6 +50,8 @@ android/key.properties
 # Build cache and internal agents
 .agents/
 android/app/.cxx/
+.kotlin/
+android/.kotlin/
 
 # Firebase & Cloud Secrets
 supabase/functions/firebase/
